@@ -1,0 +1,42 @@
+name: publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: 校验 tag 与 package.json 版本一致
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "tag 是 v$tag，package.json 是 $version，不一致，拒绝发布。" >&2
+            exit 1
+          fi
+
+      - name: 测试（单测 + 无头 Chrome 像素校验）
+        run: npm test
+
+      - name: 打包
+        run: npx --yes @vscode/vsce package --no-dependencies
+
+      - name: 发布到 Marketplace
+        run: npx --yes @vscode/vsce publish --no-dependencies --pat "$VSCE_PAT"
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
