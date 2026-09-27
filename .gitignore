@@ -1,0 +1,14 @@
+node_modules/
+out/
+*.vsix
+*.tgz
+
+# 预览与量测脚本的生成物（跑 npm run make-icon / preview/gen-theme-check.js 会重新生成）
+preview/theme-check.html
+preview/_*.png
+preview/_*.html
+
+# 编辑器与系统噪音
+.DS_Store
+Thumbs.db
+*.log

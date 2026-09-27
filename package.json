@@ -1,0 +1,126 @@
+{
+  "name": "traecn-quota",
+  "displayName": "TraeCN Quota",
+  "description": "非官方（Unofficial）Trae CN 积分余量查看器：在状态栏显示余额与套餐明细，支持手动与定时刷新。",
+  "version": "0.1.0",
+  "publisher": "GhostCmdr",
+  "license": "MIT",
+  "icon": "resources/icon.png",
+  "galleryBanner": {
+    "color": "#1e415e",
+    "theme": "dark"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GhostCmdr/traecn-quota.git"
+  },
+  "bugs": {
+    "url": "https://github.com/GhostCmdr/traecn-quota/issues"
+  },
+  "homepage": "https://github.com/GhostCmdr/traecn-quota#readme",
+  "keywords": [
+    "Trae",
+    "TraeCN",
+    "Trae CN",
+    "quota",
+    "积分",
+    "额度",
+    "余额",
+    "statusbar"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "traecnquota.refresh",
+        "title": "TraeCN Quota: 刷新积分"
+      },
+      {
+        "command": "traecnquota.clearManualToken",
+        "title": "TraeCN Quota: 清除保管箱里的手动 Token"
+      }
+    ],
+    "icons": {
+      "trae-sparkle": {
+        "description": "Trae 积分",
+        "default": {
+          "fontPath": "./assets/trae-sparkle-final.ttf",
+          "fontCharacter": "\\E001"
+        }
+      }
+    },
+    "configuration": {
+      "title": "TraeCN Quota",
+      "properties": {
+        "traecnquota.refreshInterval": {
+          "category": "TraeCN Quota",
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "markdownDescription": "积分自动刷新间隔（分钟）。`0` 表示不自动刷新。"
+        },
+        "traecnquota.detailRows": {
+          "category": "TraeCN Quota",
+          "type": "number",
+          "default": 3,
+          "minimum": 2,
+          "maximum": 5,
+          "markdownDescription": "积分包显示数量，按到期时间升序，超出的不显示。可调 `2` ~ `5`。"
+        },
+        "traecnquota.edition": {
+          "category": "TraeCN Quota",
+          "type": "string",
+          "enum": [
+            "auto",
+            "cn",
+            "solo-cn"
+          ],
+          "enumDescriptions": [
+            "自动检测已安装并登录的 Trae 国内版客户端",
+            "Trae CN（TraeCode 国内版）",
+            "TRAE SOLO CN（TraeWork 国内版）"
+          ],
+          "default": "auto",
+          "markdownDescription": "从哪个 Trae 国内版客户端的本地登录态读取凭证。"
+        },
+        "traecnquota.hostOverride": {
+          "category": "TraeCN Quota",
+          "type": "string",
+          "default": "",
+          "markdownDescription": "覆盖 API 基地址，仅供调试。出于凭证安全只接受默认端口上的 `https://api.trae.cn`，其他值（含任意 `*.trae.cn` 子域）会被忽略并回落。"
+        },
+        "traecnquota.manualToken": {
+          "category": "TraeCN Quota",
+          "type": "string",
+          "default": "",
+          "format": "password",
+          "markdownDescription": "手动指定 accessToken。输入后，自动存进 VSCode 的加密保管箱并把本项清空，`settings.json` 里不留明文。如需弃用，请执行命令 **TraeCN Quota: 清除保管箱里的手动 Token**。留空时自动从 Trae 客户端的本地登录态解密获取。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "make-icon": "node scripts/make-icon.js",
+    "pretest": "npm run compile",
+    "test": "node --test \"test/**/*.test.js\" && node preview/measure-pixels.js --check",
+    "test:layout": "node preview/measure-pixels.js --check",
+    "test:unit": "node --test \"test/**/*.test.js\"",
+    "package": "npx --yes @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.5"
+  }
+}
