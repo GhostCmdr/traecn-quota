@@ -2,6 +2,8 @@
 
 在状态栏实时显示 Trae CN（trae.cn）账号的积分余额与套餐明细。
 
+安装：VS Code / Trae 的扩展面板搜索 **TraeCN Quota**，或见[市场页](https://marketplace.visualstudio.com/items?itemName=GhostCmdr.traecn-quota)。
+
 > **非官方声明**
 > - 本扩展**不隶属于 Trae、字节跳动或腾讯**，与它们没有任何关联、授权或背书关系；"Trae CN" 仅用于说明适用的服务对象。
 > - 它通过 Trae 的**非公开接口**读取你本人账号的余额，接口变动就可能失效，届时按"原样提供"处理（见 [LICENSE](LICENSE)）。
