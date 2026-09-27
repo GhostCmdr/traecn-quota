@@ -1,8 +1,8 @@
 {
   "name": "traecn-quota",
   "displayName": "TraeCN Quota",
-  "description": "非官方（Unofficial）Trae CN 积分余量查看器：在状态栏显示余额与套餐明细，支持手动与定时刷新。",
-  "version": "0.1.0",
+  "description": "Trae CN 积分余量查看器：在状态栏显示余额与套餐明细，支持手动与定时刷新。",
+  "version": "0.1.1",
   "publisher": "GhostCmdr",
   "license": "MIT",
   "icon": "resources/icon.png",
