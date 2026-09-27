@@ -128,6 +128,15 @@ function fetchFailReason(err: unknown): string {
   return safeSnippet(cause ? msg + ' · ' + cause : msg);
 }
 
+/** 请求或读正文被打断时的统一说法；超时和断流的原始消息都是引擎英文术语 */
+function requestFailure(apiPath: string, err: unknown): Error {
+  const name = (err as Error)?.name;
+  if (name === 'TimeoutError' || name === 'AbortError') {
+    return new Error(`请求 ${apiPath} 超时（${REQUEST_TIMEOUT_MS / 1000}s），请检查网络或代理`);
+  }
+  return new Error(`请求 ${apiPath} 失败：${fetchFailReason(err)}`);
+}
+
 async function postJson<T extends { code?: number; message?: string }>(auth: TraeAuth, apiPath: string, body: unknown): Promise<T> {
   // 发送边界的最后一道断言：凭证只允许发往官方地址，防止以后新增凭证来源时漏掉归一化
   if (auth.host !== DEFAULT_HOST) {
@@ -143,14 +152,18 @@ async function postJson<T extends { code?: number; message?: string }>(auth: Tra
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
     });
   } catch (err) {
-    const name = (err as Error).name;
-    if (name === 'TimeoutError' || name === 'AbortError') {
-      throw new Error(`请求 ${apiPath} 超时（${REQUEST_TIMEOUT_MS / 1000}s），请检查网络或代理`);
-    }
-    throw new Error(`请求 ${apiPath} 失败：${fetchFailReason(err)}`);
+    throw requestFailure(apiPath, err);
   }
 
-  const text = await res.text();
+  // 响应头到了不等于正文到了：超时定时器可能在读正文时才触发，代理也可能中途断流。
+  // 先记下来不急着抛——状态码已经到手，它比「流断了」更能告诉用户下一步做什么。
+  let text: string | undefined;
+  let readErr: unknown;
+  try {
+    text = await res.text();
+  } catch (err) {
+    readErr = err;
+  }
   if (res.status === 401) {
     throw apiError(
       '认证失败（HTTP 401）：token 可能已过期或不属于国内版。国际版（trae.ai）暂无积分接口，请使用国内版账号。',
@@ -160,6 +173,9 @@ async function postJson<T extends { code?: number; message?: string }>(auth: Tra
   }
   if (res.status !== 200) {
     throw apiError(`请求 ${apiPath} 返回 HTTP ${res.status}`, text, res.status);
+  }
+  if (readErr !== undefined || text === undefined) {
+    throw requestFailure(apiPath, readErr);
   }
   let data: T;
   try {
@@ -209,14 +225,19 @@ export async function fetchCredits(auth: TraeAuth): Promise<CreditsSummary> {
   let hasUnlimitedPack = false;
 
   for (const pack of raw.user_entitlement_pack_list ?? []) {
-    const packLimit = pack.entitlement_base_info?.quota?.credits_limit;
-    const packUsed = typeof pack.usage?.credits_amount === 'number' ? pack.usage.credits_amount : 0;
+    // 声明是 number 不代表运行时是：JSON.parse 会给出 Infinity(1e999)、字符串、对象，
+    // 漏掉任一项都会让整条链路变成 NaN
+    const rawLimit = pack.entitlement_base_info?.quota?.credits_limit;
+    const packLimit = typeof rawLimit === 'number' && Number.isFinite(rawLimit) ? rawLimit : undefined;
+    const rawUsed = pack.usage?.credits_amount;
+    const packUsed = typeof rawUsed === 'number' && Number.isFinite(rawUsed) ? rawUsed : 0;
+    const rawName = (pack as { display_desc?: unknown }).display_desc;
 
     let packRemaining: number | undefined;
     if (packLimit === -1) {
       hasQuota = true;
       hasUnlimitedPack = true;
-    } else if (typeof packLimit === 'number' && packLimit > 0) {
+    } else if (packLimit !== undefined && packLimit > 0) {
       hasQuota = true;
       limit += packLimit;
       used += packUsed;
@@ -225,12 +246,12 @@ export async function fetchCredits(auth: TraeAuth): Promise<CreditsSummary> {
     }
 
     packs.push({
-      name: pack.display_desc || '积分包',
+      name: typeof rawName === 'string' && rawName.trim() ? rawName : '积分包',
       limit: packLimit,
       used: packUsed,
       remaining: packRemaining,
       unlimited: packLimit === -1,
-      expireTime: typeof pack.expire_time === 'number' ? pack.expire_time : undefined
+      expireTime: typeof pack.expire_time === 'number' && Number.isFinite(pack.expire_time) ? pack.expire_time : undefined
     });
   }
 

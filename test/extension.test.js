@@ -1,4 +1,4 @@
-const { test } = require('node:test');
+const { test, mock } = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
 const os = require('os');
@@ -21,6 +21,10 @@ function makeVscodeStub(initialConfig = {}, options = {}) {
   /** 模拟 VSCode 的加密保管箱：插件侧只能通过 get/store 访问 */
   const secrets = new Map();
   const storeFail = options.storeFail;
+  /** 让保管箱读取抛错 / 永不返回，模拟系统钥匙串拒绝与授权框挂住 */
+  const getFail = options.getFail;
+  const getHang = options.getHang;
+  const onUpdate = options.onUpdate;
   let configChangeHandler = null;
   let themeChangeHandler = null;
 
@@ -85,6 +89,10 @@ function makeVscodeStub(initialConfig = {}, options = {}) {
             scopes[name][key] = value;
           }
           recompute(key);
+          // 留给测试注入「清理与回声之间的那一小段时间里又落进来一份新值」
+          if (onUpdate) {
+            onUpdate(key);
+          }
           // 真实环境里 configuration 事件是异步派发的（可能晚于 update 的 resolve），
           // 同步派发会让"自己清空设置项的回声"这类竞态在测试里永远不发生
           setImmediate(() => fireConfigChange(`traecnquota.${key}`));
@@ -101,7 +109,14 @@ function makeVscodeStub(initialConfig = {}, options = {}) {
     context: {
       subscriptions: [],
       secrets: {
-        get: async key => secrets.get(key),
+        get: getHang
+          ? () => new Promise(() => undefined)
+          : async key => {
+              if (getFail) {
+                throw new Error(getFail);
+              }
+              return secrets.get(key);
+            },
         store: async (key, value) => {
           if (storeFail) {
             throw new Error('secret storage unavailable');
@@ -640,5 +655,270 @@ test('登录态结构不认识时报清楚，且不把脏值带进请求', async
   assert.match(String(activeStub.statusItems[0].tooltip), /没有可用的 accessToken/, '要指出是 accessToken 这一项坏了');
   assert.strictEqual(urls.length, 0, '结构不认识就不该发请求，更不能把 12345 当 token 用');
   isolate.restore();
+  globalThis.fetch = undefined;
+});
+
+test('保管箱读取报错时回落到客户端登录态，而不是整轮失败', async () => {
+  const isolate = isolateLoginState('getfail');
+  fs.writeFileSync(isolate.storageJson('Trae CN'), JSON.stringify({
+    'iCubeAuthInfo://icube.cloudide': JSON.stringify({ token: 'client-token', userId: '42', host: 'https://api.trae.cn' })
+  }), 'utf8');
+  const heads = [];
+  globalThis.fetch = async (url, init) => {
+    heads.push(init.headers.Authorization);
+    return { status: 200, text: async () => JSON.stringify(String(url).includes('checkin') ? { enable: true, checked_in: false } : usageBody) };
+  };
+  activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0 }, { getFail: 'keychain unavailable' });
+  activeStub.seedSecret('manualToken', 'vault-token');
+  const ext = freshRequire();
+  ext.activate(activeStub.context);
+  await settle();
+  assert.strictEqual(heads.length, 2, '钥匙串读不出来也得把数取回来');
+  assert.ok(heads.every(h => h === 'Cloud-IDE-JWT client-token'), '读不出保管箱就改用客户端登录态');
+  assert.match(activeStub.statusItems[0].text, /1,500 \(83%\)/, '状态栏要出数，不能停在失败态');
+  assert.ok(activeStub.logs.some(l => /保管箱读取失败/.test(l)), '降级要在输出面板留痕');
+  isolate.restore();
+  globalThis.fetch = undefined;
+});
+
+test('保管箱读取挂住时按超时放行，刷新锁不能把状态栏永久钉在「刷新中」', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const isolate = isolateLoginState('gethang');
+    fs.writeFileSync(isolate.storageJson('Trae CN'), JSON.stringify({
+      'iCubeAuthInfo://icube.cloudide': JSON.stringify({ token: 'client-token', userId: '42', host: 'https://api.trae.cn' })
+    }), 'utf8');
+    const heads = [];
+    globalThis.fetch = async (url, init) => {
+      heads.push(init.headers.Authorization);
+      return { status: 200, text: async () => JSON.stringify(String(url).includes('checkin') ? { enable: true, checked_in: false } : usageBody) };
+    };
+    activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0 }, { getHang: true });
+    activeStub.seedSecret('manualToken', 'vault-token');
+    const ext = freshRequire();
+    ext.activate(activeStub.context);
+    await settle();
+    assert.strictEqual(heads.length, 0, '挂住期间发不出请求');
+    assert.match(activeStub.statusItems[0].text, /TraeCN --/, '还没取到数就保持初始占位');
+    mock.timers.tick(5000);
+    await settle();
+    assert.strictEqual(heads.length, 2, '超过 5s 必须放行去取数');
+    assert.ok(heads.every(h => h === 'Cloud-IDE-JWT client-token'));
+    assert.match(activeStub.statusItems[0].text, /1,500 \(83%\)/, '超时放行后照样出数');
+    const before = heads.length;
+    // 命令内部还要再读一次保管箱（同样挂住），所以不能 await 它返回，只能再放行一次超时
+    void activeStub.commands.get('traecnquota.refresh')();
+    mock.timers.tick(5000);
+    await settle();
+    assert.strictEqual(heads.length, before + 2, '挂住的那轮不能永久占着刷新锁');
+    isolate.restore();
+  } finally {
+    mock.timers.reset();
+    globalThis.fetch = undefined;
+  }
+});
+
+test('不限量积分包：状态栏与悬浮窗显示 ∞ 和「不限量」，不是 0 / 0', async () => {
+  globalThis.fetch = async url => ({
+    status: 200,
+    text: async () => JSON.stringify(String(url).includes('checkin')
+      ? { enable: true, checked_in: true }
+      : { user_entitlement_pack_list: [packOf('赠送包', -1, 5, 1)] })
+  });
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = freshRequire();
+  ext.activate(activeStub.context);
+  await settle();
+  assert.strictEqual(activeStub.statusItems[0].text, '$(trae-sparkle) ∞');
+  const svg = bodySvgOf(activeStub);
+  assert.ok(svg.includes('∞') && svg.includes('不限量'), svg.slice(0, 200));
+  assert.doesNotMatch(svg, /0 \/ 0/);
+  globalThis.fetch = undefined;
+});
+
+test('不限量与有限额包并存：整体仍按有限额算占比，只有那一行是 ∞', async () => {
+  globalThis.fetch = async url => ({
+    status: 200,
+    text: async () => JSON.stringify(String(url).includes('checkin')
+      ? { enable: true, checked_in: false }
+      : { user_entitlement_pack_list: [packOf('赠送包', -1, 5, 1), packOf('月度包', 1000, 200, 2)] })
+  });
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = freshRequire();
+  ext.activate(activeStub.context);
+  await settle();
+  assert.strictEqual(activeStub.statusItems[0].text, '$(trae-sparkle) 800 (80%)');
+  const svg = bodySvgOf(activeStub);
+  assert.ok(svg.includes('∞') && svg.includes('不限量'), '明细里那行要标成不限量');
+  globalThis.fetch = undefined;
+});
+
+test('hostOverride 只有官方地址会真的生效；写别的地址时一个字节都不发往它', async () => {
+  const urls = [];
+  globalThis.fetch = async url => {
+    urls.push(String(url));
+    return { status: 200, text: async () => JSON.stringify(usageBody) };
+  };
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, hostOverride: 'https://api.trae.cn' });
+  const ext = freshRequire();
+  ext.activate(activeStub.context);
+  await settle();
+  assert.ok(urls.length >= 2, '配置链路要真的发出请求');
+  assert.ok(urls.every(u => u.startsWith('https://api.trae.cn/trae/')), urls.join(','));
+
+  urls.length = 0;
+  activeStub.setConfig('hostOverride', 'https://evil.example');
+  await activeStub.fireConfigurationChange('traecnquota.hostOverride');
+  await settle();
+  assert.ok(urls.length >= 2, '被拒绝也要回落到默认地址照常取数');
+  assert.ok(urls.every(u => u.startsWith('https://api.trae.cn/trae/')), '凭证绝不能发往白名单外的主机');
+  assert.ok(activeStub.logs.some(l => /已忽略 hostOverride/.test(l)), '忽略要留痕，不能静默改掉用户填的值');
+  globalThis.fetch = undefined;
+});
+
+test('清理设置项的窗口期内又落进一份新 token：新值必须被收走，不能当回声吞掉', async () => {
+  const heads = [];
+  globalThis.fetch = async (url, init) => {
+    heads.push(init.headers.Authorization);
+    return { status: 200, text: async () => JSON.stringify(String(url).includes('checkin') ? { enable: true, checked_in: false } : usageBody) };
+  };
+  let harness;
+  let injected = false;
+  harness = activeStub = makeVscodeStub({ manualToken: 'first-token', detailRows: 3, refreshInterval: 0 }, {
+    // 「已存进保管箱、正在清空设置项」那几毫秒里用户又粘了一次
+    onUpdate: key => {
+      if (key === 'manualToken' && !injected) {
+        injected = true;
+        harness.setConfig('manualToken', 'second-token');
+      }
+    }
+  });
+  const ext = freshRequire();
+  ext.activate(harness.context);
+  await settle();
+  assert.strictEqual(harness.secrets.get('manualToken'), 'second-token', '窗口期内的新值不能被吞掉');
+  assert.ok(!harness.getConfig('manualToken'), 'settings.json 里不能留下明文');
+  assert.ok(heads.some(h => h === 'Cloud-IDE-JWT second-token'), '取数要用最新那份');
+  globalThis.fetch = undefined;
+});
+
+test('refreshInterval 写成空值或布尔不是「关闭」：只有显式 0 才停定时器', async () => {
+  countingFetch();
+  for (const bad of ['', true, 'abc']) {
+    activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: bad });
+    const ext = freshRequire();
+    ext.activate(activeStub.context);
+    await settle();
+    assert.ok(!activeStub.logs.some(l => /已关闭积分自动刷新/.test(l)), JSON.stringify(bad) + ' 不该被当成关闭');
+    ext.deactivate();
+  }
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = freshRequire();
+  ext.activate(activeStub.context);
+  await settle();
+  assert.ok(activeStub.logs.some(l => /已关闭积分自动刷新/.test(l)), '显式 0 才是关闭');
+  ext.deactivate();
+  globalThis.fetch = undefined;
+});
+
+test('服务端把 display_desc 写成数字时按默认名渲染，不能把 TypeError 摆到界面上', async () => {
+  const body = '{"user_entitlement_pack_list":[{"display_desc":12345,"entitlement_base_info":{"quota":{"credits_limit":1000}},"usage":{"credits_amount":200}}]}';
+  globalThis.fetch = async url => ({
+    status: 200,
+    text: async () => String(url).includes('checkin') ? JSON.stringify({ enable: true, checked_in: false }) : body
+  });
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = freshRequire();
+  ext.activate(activeStub.context);
+  await settle();
+  assert.match(activeStub.statusItems[0].text, /\$\(trae-sparkle\) 800 \(80%\)/, activeStub.statusItems[0].text);
+  const tip = String(activeStub.statusItems[0].tooltip.value || activeStub.statusItems[0].tooltip);
+  assert.doesNotMatch(tip, /TypeError|is not a function|not iterable/, tip.slice(0, 200));
+  assert.ok(bodySvgOf(activeStub).includes('积分包'), '脏名称要回落成可读的默认名');
+  globalThis.fetch = undefined;
+});
+
+test('签到请求比积分慢时锁不能提前放手，否则旧签到会盖掉新一轮', async () => {
+  let release;
+  const gate = new Promise(r => { release = r; });
+  let mode = 'fail';
+  const urls = [];
+  globalThis.fetch = async url => {
+    urls.push(String(url));
+    if (String(url).includes('checkin')) {
+      await gate;
+      return { status: 200, text: async () => JSON.stringify({ enable: true, checked_in: true }) };
+    }
+    return mode === 'fail'
+      ? { status: 500, text: async () => 'boom' }
+      : { status: 200, text: async () => JSON.stringify(usageBody) };
+  };
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = freshRequire();
+  ext.activate(activeStub.context);
+  await settle();
+  assert.match(activeStub.statusItems[0].text, /刷新中/, '积分先失败但签到还挂着，这一轮就没结束');
+  mode = 'ok';
+  await activeStub.commands.get('traecnquota.refresh')();
+  assert.ok(activeStub.calls.info.some(m => /正在刷新中/.test(m)), '锁必须覆盖到最后一个请求落定');
+  assert.strictEqual(urls.filter(u => !String(u).includes('checkin')).length, 1, '挂着的签到期间不能又起一轮取数');
+  release();
+  await settle();
+  assert.match(activeStub.statusItems[0].text, /TraeCN --/, '两个请求都落定后按积分失败降级');
+  globalThis.fetch = undefined;
+});
+
+test('额度显示按量级压缩：1 万以内千分位，1 万~1 亿用 w，1 亿以上用亿', () => {
+  // api.js 在加载时就断言全局 fetch 存在，纯格式化测试也要先装桩
+  countingFetch();
+  activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0 });
+  const ext = freshRequire();
+  const table = [
+    [0, '0'], [5802, '5,802'], [9999, '9,999'], [10000, '1w'], [15300, '1.5w'],
+    [999999, '100w'], [1234567, '123.5w'], [98765432, '9,877w'], [123456789, '1.2亿']
+  ];
+  for (const [v, want] of table) {
+    assert.strictEqual(ext.fmtCredits(v), want, String(v));
+  }
+});
+
+test('名称列格数按额度串实测宽度让位；1 万以内的数据与定稿布局一像素不差', () => {
+  countingFetch();
+  activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0 });
+  const ext = freshRequire();
+  assert.strictEqual(ext.nameCells('2,000 / 2,000'), 10, '定稿数据下 5 个汉字的名称必须原样放得下');
+  assert.strictEqual(ext.nameCells('1,202 / 2,000'), 10);
+  assert.strictEqual(ext.nameCells('100w / 100w'), 11);
+  assert.strictEqual(ext.nameCells('1.5w / 2w'), 11, '窄额度串回到 11 格上限');
+  assert.strictEqual(ext.nameCells('9,999 / 10,000'), 9, '额度串变宽就得让出名称列');
+  assert.ok(ext.nameCells('9,877w / 9,877w') < 11);
+  // 推进宽度估算必须贴住 Chrome 像素扫描的实测墨迹宽，否则整套列间距推导都不成立
+  const measured = [['2,000 / 2,000', 63], ['9,999 / 10,000', 69], ['1.5w / 2w', 47], ['100w / 100w', 62], ['9,999w / 9,999w', 79]];
+  for (const [s, px] of measured) {
+    assert.ok(Math.abs(ext.textPx(s) - px) <= 1.5, s + ' 估算 ' + ext.textPx(s).toFixed(1) + '，实测 ' + px);
+  }
+  globalThis.fetch = undefined;
+});
+
+test('大额度实测：明细行按 w 压缩后渲染，名称与额度两列不重叠', async () => {
+  globalThis.fetch = async url => ({
+    status: 200,
+    text: async () => JSON.stringify(String(url).includes('checkin')
+      ? { enable: true, checked_in: false }
+      : { user_entitlement_pack_list: [packOf('限时活动赠送积分包', 1234567, 234567, 1)] })
+  });
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = freshRequire();
+  ext.activate(activeStub.context);
+  await settle();
+  assert.strictEqual(activeStub.statusItems[0].text, '$(trae-sparkle) 100w (81%)');
+  const svg = bodySvgOf(activeStub);
+  const quota = /font-size="11" text-anchor="end"><tspan[^>]*>([^<]*)<\/tspan><tspan[^>]*> \/ ([^<]*)<\/tspan>/.exec(svg);
+  assert.ok(quota, '明细行额度单元格没找到：' + svg.slice(0, 300));
+  assert.strictEqual(quota[1] + ' / ' + quota[2], '100w / 123.5w');
+  const name = /<text x="0" y="\d+" fill="[^"]*" font-size="11">([^<]*)<\/text>/.exec(svg);
+  assert.ok(name && name[1].includes('…'), '9 字名称超过 11 格上限，必须仍被截断：' + (name && name[1]));
+  const gap = 145.6 - ext.textPx(quota[1] + ' / ' + quota[2]) - ext.textPx(name[1]);
+  assert.ok(gap >= 19, '两列字面间距实测 ' + gap.toFixed(1) + 'px，不该低于 20px');
   globalThis.fetch = undefined;
 });
