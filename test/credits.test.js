@@ -147,3 +147,40 @@ test('设备标识恒定且格式正确（每次换身份会被服务端判异�
   assert.match(seen[0], /^[0-9a-f]{32}$/);
   assert.strictEqual(seen[0], seen[1]);
 });
+
+test('响应头到了但正文读不出来：按超时/网络问题说，不裸抛引擎消息', async () => {
+  const api = stubFetch(async () => ({
+    status: 200,
+    text: async () => {
+      const e = new Error('The operation was aborted due to timeout');
+      e.name = 'TimeoutError';
+      throw e;
+    }
+  }));
+  await assert.rejects(() => api.fetchCredits(auth), /超时（8s），请检查网络或代理/);
+});
+
+test('401 且正文读不出来时仍按认证失败归类，状态码不能丢', async () => {
+  // 扩展靠 httpStatus 判断「登录态过期，去客户端重新登录」，降级成网络错误就把用户引到别处
+  const api = stubFetch(async () => ({ status: 401, text: async () => { throw new Error('terminated'); } }));
+  await assert.rejects(() => api.fetchCredits(auth), err => {
+    assert.strictEqual(err.httpStatus, 401);
+    assert.match(err.message, /认证失败/);
+    return true;
+  });
+});
+
+test('1e999 这类 Infinity 额度与脏 display_desc：不产生 NaN，名称回落', async () => {
+  // 必须手写 JSON：Infinity 经 JSON.stringify 会变成 null，测不到真正的 1e999 解析结果
+  const body = '{"user_entitlement_pack_list":[' +
+    '{"display_desc":12345,"entitlement_base_info":{"quota":{"credits_limit":1e999}},"usage":{"credits_amount":100}},' +
+    '{"display_desc":{"nested":1},"entitlement_base_info":{"quota":{"credits_limit":1000}},"usage":{"credits_amount":200}}]}';
+  const api = stubFetch(async () => ({ status: 200, text: async () => body }));
+  const s = await api.fetchCredits(auth);
+  assert.strictEqual(s.limit, 1000, 'Infinity 那包不该进累加');
+  assert.strictEqual(s.remaining, 800);
+  assert.strictEqual(String(s.remaining), '800', '任何一环变成 NaN 都会一路传到进度条');
+  assert.strictEqual(s.packs.length, 1, '无效包不进明细');
+  assert.strictEqual(typeof s.packs[0].name, 'string', 'display_desc 不是字符串时要回落，否则渲染阶段抛 TypeError');
+  assert.strictEqual(s.packs[0].name, '积分包');
+});

@@ -24,6 +24,9 @@ let checkinNote = '';
 
 /** 悬浮窗明细行数的默认值，与 package.json 里 traecnquota.detailRows 的 default 保持一致 */
 const DEFAULT_DETAIL_ROWS = 3;
+/** 自动刷新间隔（分钟）的默认值与上限，与 package.json 里 default/maximum 保持一致 */
+const DEFAULT_REFRESH_MINUTES = 30;
+const MAX_REFRESH_MINUTES = 1440;
 /** 改了必须重新取数的设置项；不在此列的（detailRows）只需按上一次数据重绘 */
 const REFRESH_KEYS = ['edition', 'hostOverride', 'manualToken', 'refreshInterval'];
 
@@ -56,6 +59,34 @@ function fmtInt(value: number): string {
   return Math.round(value).toLocaleString('en-US');
 }
 
+/**
+ * 额度显示。积分可以到 6~7 位，而明细行额度列只有约 63px 的字面预算（再宽就往名称列上压），
+ * 所以 1 万以上改用 w（万）、1 亿以上改用「亿」，保留 1 位小数并去掉多余的 .0。
+ * 实测（无头 Chrome 像素扫描，字号 11）：9,999 / 10,000 = 69px，1.5w / 2w = 47px。
+ */
+export function fmtCredits(value: number): string {
+  const n = Math.round(value);
+  if (!Number.isFinite(n)) {
+    return '-';
+  }
+  if (n < 10000) {
+    return fmtInt(n);
+  }
+  const scale = n < 1e8 ? { div: 1e4, unit: 'w' } : { div: 1e8, unit: '亿' };
+  const scaled = n / scale.div;
+  return fmtDecimal(scaled, scaled >= 1000 ? 0 : 1) + scale.unit;
+}
+
+/** 定点小数 + 千分位整数部分；小数尾部的 0 去掉（100.0 → 100） */
+function fmtDecimal(scaled: number, digits: number): string {
+  const fixed = scaled.toFixed(digits);
+  const dot = fixed.indexOf('.');
+  const intPart = dot < 0 ? fixed : fixed.slice(0, dot);
+  const fracPart = dot < 0 ? '' : fixed.slice(dot + 1).replace(/0+$/, '');
+  const grouped = Number(intPart).toLocaleString('en-US');
+  return fracPart ? `${grouped}.${fracPart}` : grouped;
+}
+
 /** 剩余占比。状态栏文字与悬浮窗必须同一个口径，否则数据异常时会一个封顶一个不封顶 */
 function pctOf(summary: CreditsSummary): number {
   if (summary.unlimited) {
@@ -68,7 +99,7 @@ function pctOf(summary: CreditsSummary): number {
 }
 
 function fmtQuota(value: number, unlimited: boolean): string {
-  return unlimited ? '不限量' : fmtInt(value);
+  return unlimited ? '不限量' : fmtCredits(value);
 }
 
 function fmtTime(seconds?: number): string {
@@ -178,8 +209,39 @@ async function clearManualToken(): Promise<void> {
   await refresh(false);
 }
 
+/** 保管箱读不出来的两种死法：钥匙串直接拒绝（抛），或弹授权框后永远不返回（挂）。 */
+const SECRET_READ_TIMEOUT_MS = 5000;
+
+/** 挂住比报错更糟：resolveAuth 在刷新锁之后调用，读不返回就等于状态栏永久卡在「刷新中」 */
+async function storedToken(): Promise<string> {
+  if (!secretStore) {
+    return '';
+  }
+  // SecretStorage.get 给的是 Thenable，不是 Promise（没有 .catch）
+  const pending = Promise.resolve(secretStore.get(TOKEN_SECRET));
+  // 超时之后钥匙串仍可能 reject，先接住，免得变成无人处理的 rejection
+  pending.catch(() => undefined);
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const stored = await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`读取超过 ${SECRET_READ_TIMEOUT_MS / 1000}s 未返回`)), SECRET_READ_TIMEOUT_MS);
+      })
+    ]);
+    return (stored || '').trim();
+  } catch (err) {
+    log(`保管箱读取失败（${messageOf(err)}），本次改用客户端登录态`);
+    return '';
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 async function resolveAuth(): Promise<TraeAuth> {
-  const manual = ((await secretStore?.get(TOKEN_SECRET)) || '').trim();
+  const manual = await storedToken();
   let auth: TraeAuth;
   if (manual) {
     auth = loadAuthFromToken(manual);
@@ -254,6 +316,60 @@ function truncate(s: string, width: number): string {
     out += ch;
   }
   return out + '…';
+}
+
+/** 明细行两列的字面间距与额度列右锚点，与 buildTooltipBody 里的 X_QUOTA/GAP 同一套实测常数 */
+const QUOTA_RIGHT = 145.6;
+const COL_GAP_PX = 20;
+/** 1 个显示格（半个汉字）在 11px 字号下的推进宽度 */
+const CELL_PX = 5.5;
+/**
+ * 省略号实测 8.5px，而 displayWidth 只算它 1 格（5.5px），截断出来的名称会比格数估算宽 3px。
+ * 不给这点余量的话，满截断名称与额度列之间实测只剩 19.1px（无头 Chrome getBBox 实测）。
+ */
+const ELLIPSIS_EXTRA_PX = 3;
+const NAME_CELLS_MAX = 11;
+const NAME_CELLS_MIN = 6;
+
+/** 11px 字号下各字形的推进宽度，无头 Chrome 像素扫描实测（整串误差 <1px） */
+function glyphPx(ch: string): number {
+  const c = ch.codePointAt(0) ?? 0;
+  if (c >= 0x2e80) {
+    return 11; // 汉字与全角标点
+  }
+  if (ch === ' ') {
+    return 2.8;
+  }
+  if (ch === ',' || ch === '.') {
+    return 3.1;
+  }
+  if (ch === '/') {
+    return 3.4;
+  }
+  if (ch === 'w') {
+    return 7.9;
+  }
+  if (ch === '…') {
+    return 8.5;
+  }
+  return 6.1; // 数字
+}
+
+export function textPx(s: string): number {
+  let px = 0;
+  for (const ch of s) {
+    px += glyphPx(ch);
+  }
+  return px;
+}
+
+/**
+ * 名称列可用格数：额度串越宽，名称列越短，两列之间 20px 的字面间距必须恒成立。
+ * 现有数据（额度最宽 2,000 / 2,000、名称 5 个汉字）算出来仍容得下原样名称，所以定稿视觉不变。
+ */
+export function nameCells(quotaText: string): number {
+  const room = QUOTA_RIGHT - COL_GAP_PX - textPx(quotaText) - ELLIPSIS_EXTRA_PX;
+  return Math.min(NAME_CELLS_MAX, Math.max(NAME_CELLS_MIN, Math.floor(room / CELL_PX)));
 }
 
 export function svgDataUri(svg: string): string {
@@ -351,7 +467,7 @@ export function buildTooltipBody(
   const W = 251.7;
   const RIGHT = W;
   // 额度列右缘：名称列满截断字形宽 62 + 间距 20 + 额度列最宽 62.6，且到期列(86.9)左缘留出 20 间距
-  const X_QUOTA = 145.6;
+  const X_QUOTA = QUOTA_RIGHT;
   const shown = packs.slice(0, maxRows);
 
   // 纵向：相邻元素的**墨迹**之间留 GAP 行空白。墨迹延伸 = 截图逐行扫描实测（preview/measure-pixels.js），
@@ -388,8 +504,8 @@ export function buildTooltipBody(
   const parts: string[] = [];
 
   // 主数值 + 分母（数字更大更粗，分母小字贴基线）
-  const big = summary.unlimited ? '∞' : fmtInt(summary.remaining);
-  const sub = summary.unlimited ? ' 不限量' : ` / ${fmtInt(summary.limit)}`;
+  const big = summary.unlimited ? '∞' : fmtCredits(summary.remaining);
+  const sub = summary.unlimited ? ' 不限量' : ` / ${fmtCredits(summary.limit)}`;
   parts.push(
     `<text x="0" y="${numBase}" fill="${pal.strong}" font-size="30" font-weight="700">${big}<tspan fill="${pal.muted}" font-size="13" font-weight="400">${escHtml(sub)}</tspan></text>`
   );
@@ -416,11 +532,16 @@ export function buildTooltipBody(
   parts.push(`<line x1="0" y1="${headLineTop + LINE_ROWS / 2}" x2="${W}" y2="${headLineTop + LINE_ROWS / 2}" stroke="${pal.divider}" stroke-width="1"/>`);
 
   // 明细行：每行文字下方一条分隔线
+  // 名称列格数按**本次展示的最宽额度串**统一算：逐行各算各的会让同一列截断得长短不齐
+  const widestQuota = shown
+    .map(p => `${p.unlimited ? '∞' : fmtCredits(p.remaining ?? 0)} / ${p.unlimited ? '不限量' : fmtCredits(p.limit ?? 0)}`)
+    .reduce((a, b) => (textPx(b) > textPx(a) ? b : a), '');
+  const nameWidth = nameCells(widestQuota);
   let y = rowBase;
   for (const p of shown) {
-    const name = escHtml(truncate(p.name, 11));
-    const remain = p.unlimited ? '∞' : fmtInt(p.remaining ?? 0);
-    const limit = p.unlimited ? '不限量' : fmtInt(p.limit ?? 0);
+    const remain = p.unlimited ? '∞' : fmtCredits(p.remaining ?? 0);
+    const limit = p.unlimited ? '不限量' : fmtCredits(p.limit ?? 0);
+    const name = escHtml(truncate(p.name, nameWidth));
     parts.push(`<text x="0" y="${y}" fill="${pal.body}" font-size="11">${name}</text>`);
     parts.push(
       `<text x="${X_QUOTA}" y="${y}" font-size="11" text-anchor="end"><tspan fill="${pal.strong}" font-weight="600">${remain}</tspan><tspan fill="${pal.muted}" font-weight="400"> / ${limit}</tspan></text>`
@@ -453,11 +574,10 @@ function render(summary: CreditsSummary): void {
   const pct = pctOf(summary);
   statusBar.text = summary.unlimited
     ? '$(trae-sparkle) ∞'
-    : `$(trae-sparkle) ${fmtInt(summary.remaining)} (${pct}%)`;
+    : `$(trae-sparkle) ${fmtCredits(summary.remaining)} (${pct}%)`;
 
-  const packs = summary.packs
-    .filter(p => p.unlimited || (p.remaining ?? 0) > 0)
-    .sort((a, b) => (a.expireTime ?? Infinity) - (b.expireTime ?? Infinity));
+  // 哪些包进明细由 api.ts 一处决定（已用尽的不返回），这里只排序，不再重复过滤
+  const packs = [...summary.packs].sort((a, b) => (a.expireTime ?? Infinity) - (b.expireTime ?? Infinity));
 
   const pal = paletteFor(vscode.window.activeColorTheme.kind);
   const iconColor = pal.muted;
@@ -504,8 +624,16 @@ async function refresh(verbose: boolean, preResolved?: TraeAuth): Promise<void> 
     statusBar.text = '$(sync~spin) 刷新中…';
     statusBar.tooltip = '正在刷新积分…';
     auth = preResolved ?? (await resolveAuth());
-    // 积分与签到状态两个接口并行请求，缩短刷新耗时
-    const [summary] = await Promise.all([fetchCredits(auth), refreshCheckinState(auth)]);
+    // 积分与签到两个接口并行请求，但必须一起等完：Promise.all 会在积分先失败时立刻放锁，
+    // 留下还在飞的签到请求把下一轮的状态盖掉
+    const [credits, checkin] = await Promise.allSettled([fetchCredits(auth), refreshCheckinState(auth)]);
+    if (checkin.status === 'rejected') {
+      log(`签到状态查询异常：${messageOf(checkin.reason)}`);
+    }
+    if (credits.status === 'rejected') {
+      throw credits.reason;
+    }
+    const summary = credits.value;
     lastSummary = summary;
     lastFetchedAt = Date.now();
     render(summary);
@@ -562,11 +690,16 @@ async function refreshCheckinState(auth: TraeAuth): Promise<void> {
 /** 定时器间隔必须是个正经数字：手改成 "abc"/true 会让 setInterval 退化成名 1ms 的循环，把接口打爆 */
 function refreshIntervalMinutes(): number {
   const raw = cfg().get<unknown>('refreshInterval');
-  const minutes = Number(raw);
-  if (raw === undefined || raw === null || !Number.isFinite(minutes)) {
-    return 30;
+  // 只有显式写 0 才是关闭。空串经 Number() 也是 0、布尔 true 是 1 分钟，
+  // 这两种都是手改 settings.json 的常见误操作，不能悄悄变成「关闭」或「一分钟一刷」
+  if (raw === undefined || raw === null || raw === '' || typeof raw === 'boolean') {
+    return DEFAULT_REFRESH_MINUTES;
   }
-  return Math.min(Math.max(Math.trunc(minutes), 0), 1440);
+  const minutes = Number(raw);
+  if (!Number.isFinite(minutes)) {
+    return DEFAULT_REFRESH_MINUTES;
+  }
+  return Math.min(Math.max(Math.trunc(minutes), 0), MAX_REFRESH_MINUTES);
 }
 
 function scheduleRefresh(): void {
@@ -616,8 +749,11 @@ export function activate(context: vscode.ExtensionContext): void {
         key => key !== 'manualToken' && event.affectsConfiguration(`traecnquota.${key}`)
       );
       const displayOnly = !tokenChanged && !otherKeyChanged && event.affectsConfiguration('traecnquota.detailRows');
-      // 自己清空设置项荡回来的回声不需要做任何事（其它窗口认不出回声，代价只是多刷一次）
-      if (tokenChanged && !otherKeyChanged && clearingTokenSetting) {
+      // 自己清空设置项荡回来的回声不需要做任何事（其它窗口认不出回声，代价只是多刷一次）。
+      // 必须再确认设置项已经空了：清理那几次 await 的窗口期内用户可能又填了一份新值，
+      // 只认布尔标记会把新值当回声吞掉——明文留在 settings.json 里，而且要等到下一个配置事件才会被收走。
+      const tokenStillSet = (cfg().get<string>('manualToken') || '').trim() !== '';
+      if (tokenChanged && !otherKeyChanged && clearingTokenSetting && !tokenStillSet) {
         return;
       }
       void (async () => {
