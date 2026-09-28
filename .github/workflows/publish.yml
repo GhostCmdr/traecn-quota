@@ -30,8 +30,11 @@ jobs:
             exit 1
           fi
 
-      - name: 测试（单测 + 无头 Chrome 像素校验）
-        run: npm test
+      - name: 单元测试
+        # 像素级布局校验（npm test 里的 preview/measure-*.js）断言的是 Segoe UI +
+        # Microsoft YaHei 下的墨迹间距，CI 机器没这两款字体，量出来必然不同——
+        # 那是本机设计常量的回归门，留在提交前本地跑（npm test）。
+        run: npm run test:unit
 
       - name: 打包
         run: npx --yes @vscode/vsce package --no-dependencies
