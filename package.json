@@ -115,6 +115,7 @@
     "make-icon": "node scripts/make-icon.js",
     "vscode:prepublish": "npm run compile",
     "pretest": "npm run compile",
+    "pretest:unit": "npm run compile",
     "test": "node --test \"test/**/*.test.js\" && node preview/measure-pixels.js --check && node preview/measure-columns.js",
     "test:layout": "node preview/measure-pixels.js --check && node preview/measure-columns.js",
     "test:unit": "node --test --test-timeout=60000 \"test/**/*.test.js\"",
