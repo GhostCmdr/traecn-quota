@@ -13,3 +13,4 @@ preview/_*.html
 Thumbs.db
 *.log
 preview/theme-check.html
+build/

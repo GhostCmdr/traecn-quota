@@ -1,5 +1,9 @@
 # 更新日志
 
+## 0.1.2
+
+市场分类补充 `Visualization`；仓库内收录状态栏星形图标字体的生成脚本与源 SVG（`scripts/make-sparkle-font.py`、`assets/source/`），此前只有成品 ttf、无法溯源。
+
 ## 0.1.1
 
 README 补充市场安装入口并精简说明文案；描述去掉冗余前缀。
