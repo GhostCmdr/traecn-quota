@@ -12,3 +12,4 @@ preview/_*.html
 .DS_Store
 Thumbs.db
 *.log
+preview/theme-check.html
