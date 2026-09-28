@@ -2,7 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const zlib = require('zlib');
 const { execFileSync } = require('child_process');
-const { chromePath } = require('./chrome.js');
+const { chromePath, chromeArgs } = require('./chrome.js');
 const { buildCard, summary } = require('./gen-theme-check.js');
 
 const REAL = {
@@ -120,7 +120,7 @@ for (const [name, svg] of Object.entries(cases)) {
   const png = path.join(__dirname, '_shot.png');
   fs.writeFileSync(html, page(svg), 'utf8');
   execFileSync(CHROME,
-    ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--force-device-scale-factor=1', '--window-size=320,420', `--screenshot=${png}`, 'file:///' + html.replace(/\\/g, '/')],
+    ['--headless=new', '--disable-gpu', ...chromeArgs(), '--hide-scrollbars', '--force-device-scale-factor=1', '--window-size=320,420', `--screenshot=${png}`, 'file:///' + html.replace(/\\/g, '/')],
     { encoding: 'utf8', timeout: 90000 });
   const { w, h, bpp, px } = decodePng(fs.readFileSync(png));
   fs.unlinkSync(html); fs.unlinkSync(png);

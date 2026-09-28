@@ -1,7 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const { execFileSync } = require('child_process');
-const { chromePath } = require('./chrome.js');
+const { chromePath, chromeArgs } = require('./chrome.js');
 const { buildCard, summary } = require('./gen-theme-check.js');
 
 /**
@@ -52,7 +52,7 @@ function measure(svg) {
   const f = path.join(__dirname, '_cols.html');
   fs.writeFileSync(f, page(svg), 'utf8');
   const dom = execFileSync(chromePath(),
-    ['--headless=new', '--disable-gpu', '--window-size=400,420', '--virtual-time-budget=3000', '--dump-dom', 'file:///' + f.replace(/\\/g, '/')],
+    ['--headless=new', '--disable-gpu', ...chromeArgs(), '--window-size=400,420', '--virtual-time-budget=3000', '--dump-dom', 'file:///' + f.replace(/\\/g, '/')],
     { encoding: 'utf8', timeout: 90000 });
   fs.unlinkSync(f);
   const rows = JSON.parse(dom.match(/<div id="out">([\s\S]*?)<\/div>/)[1].replace(/&quot;/g, '"'));
