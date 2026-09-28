@@ -4,12 +4,9 @@ on:
   push:
     tags:
       - 'v*'
-    branches:
-      - ci-debug   # 临时：github.com 直连被拦时用 API 推分支来跑 CI 定位问题，定位完删掉
 
 permissions:
   contents: read
-  issues: write   # 仅下面那个临时调试步骤用来开 issue 贴日志，定位完就删
 
 jobs:
   publish:
@@ -27,7 +24,6 @@ jobs:
       - run: npm ci
 
       - name: 校验 tag 与 package.json 版本一致
-        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           version="$(node -p "require('./package.json').version")"
           tag="${GITHUB_REF_NAME#v}"
@@ -37,24 +33,10 @@ jobs:
           fi
 
       - name: 单元测试
-        id: unit
-        shell: bash
-        run: set -o pipefail; npm run test:unit 2>&1 | tee "$RUNNER_TEMP/unit.log"
-
-      # 临时调试：本地看不到 Linux 上的失败详情，贴成 issue 供排查。定位后整段删掉
-      - name: 失败时把日志贴到 issue
-        if: failure() && steps.unit.outcome == 'failure'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          {
-            echo "### CI 单测失败（run #$GITHUB_RUN_NUMBER, commit ${GITHUB_SHA:0:7}）"
-            echo '```'
-            tail -c 18000 "$RUNNER_TEMP/unit.log"
-            echo '```'
-          } > "$RUNNER_TEMP/body.md"
-          gh issue create --title "CI 单测失败 run #$GITHUB_RUN_NUMBER" --body-file "$RUNNER_TEMP/body.md"
+        # 像素级布局校验（preview/measure-*.js）断言的是 Segoe UI + Microsoft YaHei
+        # 下的墨迹间距，CI 机器没这两款字体，量出来必然不同——那是本机设计常量的
+        # 回归门，留在提交前本地跑 npm test。test:unit 会先自动编译出 out/。
+        run: npm run test:unit
 
       - name: 打包
         run: npx --yes @vscode/vsce package --no-dependencies
