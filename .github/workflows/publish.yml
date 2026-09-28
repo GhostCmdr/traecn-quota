@@ -16,7 +16,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 与本地开发一致。测试脚本里的 "test/**/*.test.js" 由 Node 自己展开，
+          # glob 支持要 Node 21+，用 20 会当成模块路径去找 → 整步直接报错
+          node-version: 24
           cache: npm
 
       - run: npm ci
