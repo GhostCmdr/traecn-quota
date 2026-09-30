@@ -2,7 +2,19 @@
 
 在状态栏实时显示 Trae CN（trae.cn）账号的积分余额与套餐明细。
 
-安装：VS Code / Trae 的扩展面板搜索 **TraeCN Quota**，或见[市场页](https://marketplace.visualstudio.com/items?itemName=GhostCmdr.traecn-quota)。
+## 安装
+
+**扩展面板搜索**（VS Code 系）：搜 **TraeCN Quota**，或见[市场页](https://marketplace.visualstudio.com/items?itemName=GhostCmdr.traecn-quota)。命令行一步到位：
+
+```
+code --install-extension GhostCmdr.traecn-quota
+```
+
+**下载 .vsix 手动装**（Trae 用户走这条）：Trae 扩展面板默认连的是它自建的市场源，未必搜得到本插件。到 [Releases](https://github.com/GhostCmdr/traecn-quota/releases/latest) 下载 `traecn-quota-<版本号>.vsix`，在 Trae 扩展面板右上角 `⋯` 里选 **从 VSIX 安装**（也可以直接把文件拖进面板）。GitHub 访问不便时用市场直链，存成 `.vsix` 即可：
+
+```
+https://marketplace.visualstudio.com/_apis/public/gallery/publishers/GhostCmdr/vsextensions/traecn-quota/latest/vspackage
+```
 
 ## 功能
 

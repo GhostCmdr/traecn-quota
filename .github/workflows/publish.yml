@@ -5,8 +5,10 @@ on:
     tags:
       - 'v*'
 
+# contents: write 只给「挂到 GitHub Release」那步上传 .vsix 用。
+# 发 Marketplace 走的是 VSCE_PAT，跟这个仓库的权限无关。
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   publish:
@@ -31,6 +33,13 @@ jobs:
             echo "tag 是 v$tag，package.json 是 $version，不一致，拒绝发布。" >&2
             exit 1
           fi
+          # lockfile 顶层 version 失配 npm ci 不会报错，所以升版时容易漏掉它，
+          # 一漏就连着几个版本没人发现（0.1.0 的 lock 一直跟到 0.1.2 才对齐）。
+          lock="$(node -p "require('./package-lock.json').version")"
+          if [ "$lock" != "$version" ]; then
+            echo "package-lock.json 还是 $lock，package.json 是 $version。本地跑一次 npm install 对齐后再提交。" >&2
+            exit 1
+          fi
 
       - name: 单元测试
         # 像素级布局校验（preview/measure-*.js）断言的是 Segoe UI + Microsoft YaHei
@@ -40,6 +49,22 @@ jobs:
 
       - name: 打包
         run: npx --yes @vscode/vsce package --no-dependencies
+
+      - name: 挂到 GitHub Release
+        # 放在发市场之前：Trae 的扩展面板走它自己的市场源，未必搜得到微软
+        # Marketplace，这个 .vsix 附件就是给那部分用户的兜底下载口，
+        # 不该被后面市场的发布失败连带跳过。
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          tag="v${version}"
+          notes="$(awk -v h="## ${version}" 'index($0,h)==1{c=1;next} c&&/^## /{c=0} c' CHANGELOG.md)"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --target "$GITHUB_SHA" --title "$tag" --notes "${notes:-$tag}"
+          fi
+          # --clobber：重复推同一个 tag 时覆盖同名附件，不报错
+          gh release upload "$tag" ./*.vsix --clobber
 
       - name: 发布到 Marketplace
         env:
