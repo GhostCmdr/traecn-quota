@@ -1,5 +1,11 @@
 # 更新日志
 
+## 0.1.3
+
+发布产物同时挂到本仓库的 GitHub Release。Trae 扩展面板默认连的是它自建的市场源，未必搜得到本插件，那份 `.vsix` 附件就是给 Trae 用户的兜底下载口：下载后在扩展面板右上角 `⋯` 里选 **从 VSIX 安装**，或直接把文件拖进面板。README 的安装说明按「搜索装 / 命令行装 / 下 vsix 手动装」三条路径重写。
+
+打包内容修复：此前在本机跑 `npm run package` 出包，会把仓库代码索引（`.codegraph/codegraph.db`，1.17 MB）、`daemon.pid`（含本机路径）和 `.codeartsdoer` 下的 MCP 配置一起打进去。已发布版本由 CI 干净检出构建，未受影响。
+
 ## 0.1.2
 
 市场分类补充 `Visualization`；仓库内收录状态栏星形图标字体的生成脚本与源 SVG（`scripts/make-sparkle-font.py`、`assets/source/`），此前只有成品 ttf、无法溯源。
