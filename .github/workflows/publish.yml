@@ -60,8 +60,16 @@ jobs:
           version="$(node -p "require('./package.json').version")"
           tag="v${version}"
           notes="$(awk -v h="## ${version}" 'index($0,h)==1{c=1;next} c&&/^## /{c=0} c' CHANGELOG.md)"
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --target "$GITHUB_SHA" --title "$tag" --notes "${notes:-$tag}"
+          # 正文的唯一来源是 CHANGELOG.md，缺小节就断掉，不发一个没说明的 Release
+          if [ -z "$notes" ]; then
+            echo "CHANGELOG.md 里没有 ## ${version} 小节，Release 正文会是空的。" >&2
+            exit 1
+          fi
+          # 已存在就顺手把正文同步过去：改了 CHANGELOG 再重推同一个 tag 就能刷新生成稿
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "$tag" --notes "$notes"
+          else
+            gh release create "$tag" --target "$GITHUB_SHA" --title "$tag" --notes "$notes"
           fi
           # --clobber：重复推同一个 tag 时覆盖同名附件，不报错
           gh release upload "$tag" ./*.vsix --clobber
