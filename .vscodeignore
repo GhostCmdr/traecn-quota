@@ -12,3 +12,13 @@ node_modules/**
 .gitignore
 *.vsix
 tsconfig.json
+
+# 本地代码索引/IDE 助手的产物。git 侧已经忽略了，但 vsce 只看本文件：
+# 漏了这几行，本机 `npm run package` 出的包会带上整份仓库符号索引、
+# daemon.pid（含本机路径）和 mcp 配置，装的人解压就能看见。
+.arts
+.arts/**
+.codeartsdoer
+.codeartsdoer/**
+.codegraph
+.codegraph/**

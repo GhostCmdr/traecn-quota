@@ -12,9 +12,9 @@ preview/_*.html
 .DS_Store
 Thumbs.db
 *.log
-preview/theme-check.html
 build/
 # CodeArts / CodeGraph 本地工具目录与临时日志
 .arts/
+.codeartsdoer/
 .codegraph/
 
