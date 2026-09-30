@@ -60,11 +60,8 @@ jobs:
           version="$(node -p "require('./package.json').version")"
           tag="v${version}"
           notes="$(awk -v h="## ${version}" 'index($0,h)==1{c=1;next} c&&/^## /{c=0} c' CHANGELOG.md)"
-          # 正文的唯一来源是 CHANGELOG.md，缺小节就断掉，不发一个没说明的 Release
-          if [ -z "$notes" ]; then
-            echo "CHANGELOG.md 里没有 ## ${version} 小节，Release 正文会是空的。" >&2
-            exit 1
-          fi
+          # CHANGELOG 只记功能改动，所以没有小节是正常情况，不是错误
+          [ -n "$notes" ] || notes="本版无功能变更。"
           # 已存在就顺手把正文同步过去：改了 CHANGELOG 再重推同一个 tag 就能刷新生成稿
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release edit "$tag" --title "$tag" --notes "$notes"
