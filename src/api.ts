@@ -11,6 +11,7 @@ const REQUEST_TIMEOUT_MS = 8000;
 const REQ_SOURCE = 1;
 
 const PATH_CHECKIN_STATUS = '/trae/api/v2/ug/checkin_credits/status';
+const PATH_CHECKIN_CLAIM = '/trae/api/v2/ug/checkin_credits/claim';
 const PATH_ENT_USAGE = '/trae/api/v2/pay/ide_user_ent_usage';
 
 // 每台机器保持恒定的设备标识，避免每次请求都换新身份导致被服务端判定为异常流量/限流。
@@ -194,6 +195,19 @@ async function postJson<T extends { code?: number; message?: string }>(auth: Tra
 
 export function fetchCheckinStatus(auth: TraeAuth): Promise<CheckinStatus> {
   return postJson<CheckinStatus>(auth, PATH_CHECKIN_STATUS, { req_source: REQ_SOURCE });
+}
+
+export interface ClaimResult {
+  code?: number;
+  message?: string;
+}
+
+/**
+ * 领取今日签到积分。服务端对重复领取幂等（实测返回 success 且不重复发放），
+ * 所以这里不做「是否已签」的前置判断，调用时机由上层的日期守卫决定。
+ */
+export function claimCheckin(auth: TraeAuth): Promise<ClaimResult> {
+  return postJson<ClaimResult>(auth, PATH_CHECKIN_CLAIM, { req_source: REQ_SOURCE });
 }
 
 interface EntUsageResponse {
