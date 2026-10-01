@@ -202,10 +202,7 @@ export interface ClaimResult {
   message?: string;
 }
 
-/**
- * 领取今日签到积分。服务端对重复领取幂等（实测返回 success 且不重复发放），
- * 所以这里不做「是否已签」的前置判断，调用时机由上层的日期守卫决定。
- */
+/** 领取今日签到积分。服务端对重复领取幂等，故不做「是否已签」前置判断，时机由上层日期守卫决定。 */
 export function claimCheckin(auth: TraeAuth): Promise<ClaimResult> {
   return postJson<ClaimResult>(auth, PATH_CHECKIN_CLAIM, { req_source: REQ_SOURCE });
 }
