@@ -1,10 +1,19 @@
 # TraeCN Quota
 
+[English](README.en.md) | [简体中文](README.md)
+
 在状态栏实时显示 Trae CN 账号的积分余额与套餐明细。
+
+![积分卡片预览](resources/screenshot.png)
 
 ## 安装
 
-扩展面板搜索 **TraeCN Quota**（[市场页](https://marketplace.visualstudio.com/items?itemName=GhostCmdr.traecn-quota)），或从 [Releases](https://github.com/GhostCmdr/traecn-quota/releases/latest) 取 `.vsix` 自行安装。
+在你所用编辑器的扩展面板搜索 **TraeCN Quota**：
+
+- VS Code / Trae：[Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=GhostCmdr.traecn-quota)
+- VSCodium / Cursor 等：[Open VSX](https://open-vsx.org/extension/GhostCmdr/traecn-quota)
+
+也可从 [Releases](https://github.com/GhostCmdr/traecn-quota/releases/latest) 取 `.vsix` 自行安装。
 
 ## 功能
 
