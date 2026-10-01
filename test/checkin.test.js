@@ -33,3 +33,23 @@ test('claimCheckin 遇到业务错误码时抛出，不当成成功', async (t) 
   const api = stubFetch(async () => ok({ code: 1001, message: '无法认证' }));
   await assert.rejects(() => api.claimCheckin(auth), /code=1001/);
 });
+
+const { shouldClaim, todayString } = require('../out/checkin.js');
+
+test('当天没签过就该签', () => {
+  assert.strictEqual(shouldClaim(undefined, '2026-10-01'), true);
+  assert.strictEqual(shouldClaim('', '2026-10-01'), true);
+});
+
+test('当天已签成功就不该再发请求', () => {
+  assert.strictEqual(shouldClaim('2026-10-01', '2026-10-01'), false);
+});
+
+test('跨天后旧日期不作废，新的一天要重新签', () => {
+  assert.strictEqual(shouldClaim('2026-09-30', '2026-10-01'), true);
+});
+
+test('todayString 产出 YYYY-MM-DD 且不受本地时区表示法影响', () => {
+  assert.strictEqual(todayString(new Date(2026, 9, 1)), '2026-10-01');
+  assert.match(todayString(), /^\d{4}-\d{2}-\d{2}$/);
+});
