@@ -78,6 +78,12 @@
           "maximum": 5,
           "markdownDescription": "积分包显示数量，按到期时间升序，超出的不显示。可调 `2` ~ `5`。"
         },
+        "traecnquota.autoCheckin": {
+          "category": "TraeCN Quota",
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "每天自动领取一次 Trae 签到积分。领取成功当天不再重复领取；关闭后仍可手动执行 **TraeCN Quota: 立即签到**。"
+        },
         "traecnquota.edition": {
           "category": "TraeCN Quota",
           "type": "string",
