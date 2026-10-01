@@ -7,6 +7,10 @@ const fs = require('fs');
 const OUT = path.resolve(__dirname, '..', 'out');
 
 function makeVscodeStub(initialConfig = {}, options = {}) {
+  // 现有用例盯着的是「一次刷新 = 积分 + 签到状态两个请求」这个既有契约，而自动签到默认开启
+  // 会给每轮再加一个 claim、并留下排到次日凌晨的兜底定时器把测试进程吊住。
+  // 那些用例与签到无关，这里默认替它们关掉（等同用户把开关拨到关）；签到自身的用例显式传 true。
+  initialConfig = { autoCheckin: false, ...initialConfig };
   const config = {};
   /** 模拟的各作用区设置值；initialConfig 视作全局层，生效值按 workspaceFolder > workspace > global 取 */
   const scopes = {
@@ -20,6 +24,8 @@ function makeVscodeStub(initialConfig = {}, options = {}) {
   const commands = new Map();
   /** 模拟 VSCode 的加密保管箱：插件侧只能通过 get/store 访问 */
   const secrets = new Map();
+  /** 模拟 globalState：签到日期守卫靠它跨重启记住「今天签过没」。options.globalState 是普通对象，得先取 entries */
+  const globalStateMap = new Map(Object.entries(options.globalState || {}));
   const storeFail = options.storeFail;
   /** 让保管箱读取抛错 / 永不返回，模拟系统钥匙串拒绝与授权框挂住 */
   const getFail = options.getFail;
@@ -105,9 +111,14 @@ function makeVscodeStub(initialConfig = {}, options = {}) {
 
   return {
     vscode, calls, commands, statusItems, secrets, logs,
+    getGlobalState: key => globalStateMap.get(key),
     /** activate() 要用的 ExtensionContext 替身 */
     context: {
       subscriptions: [],
+      globalState: {
+        get: key => globalStateMap.get(key),
+        update: async (key, value) => void globalStateMap.set(key, value)
+      },
       secrets: {
         get: getHang
           ? () => new Promise(() => undefined)
@@ -174,7 +185,12 @@ function countingFetch() {
   const urls = [];
   globalThis.fetch = async url => {
     urls.push(String(url));
-    const body = String(url).includes('checkin') ? { enable: true, checked_in: false } : usageBody;
+    const u = String(url);
+    const body = u.includes('checkin_credits/claim')
+      ? { code: 0, message: 'success' }
+      : u.includes('checkin')
+        ? { enable: true, checked_in: false }
+        : usageBody;
     return { status: 200, text: async () => JSON.stringify(body) };
   };
   return urls;
@@ -920,5 +936,130 @@ test('大额度实测：明细行按 w 压缩后渲染，名称与额度两列�
   assert.ok(name && name[1].includes('…'), '9 字名称超过 11 格上限，必须仍被截断：' + (name && name[1]));
   const gap = 145.6 - ext.textPx(quota[1] + ' / ' + quota[2]) - ext.textPx(name[1]);
   assert.ok(gap >= 19, '两列字面间距实测 ' + gap.toFixed(1) + 'px，不该低于 20px');
+  globalThis.fetch = undefined;
+});
+
+const claimsOf = urls => urls.filter(u => u.includes('checkin_credits/claim'));
+
+test('开启自动签到时，刷新会领一次签到并记下今天日期', async () => {
+  const urls = countingFetch();
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true });
+  const ext = freshRequire();
+  ext.activate(activeStub.context);
+  await settle();
+  assert.strictEqual(claimsOf(urls).length, 1, '应当恰好发一次 claim');
+  assert.match(activeStub.getGlobalState('traecnquota.lastCheckinSuccessDate'), /^\d{4}-\d{2}-\d{2}$/);
+  assert.strictEqual(activeStub.calls.info.some(m => /签到成功/.test(m)), true, '成功要弹通知');
+  ext.deactivate(); // 签成后兜底定时器已被销毁，这里只收刷新定时器
+  globalThis.fetch = undefined;
+});
+
+test('当天已签成功时，再刷新只刷积分不再发 claim', async () => {
+  const today = new Date().toLocaleDateString('sv');
+  const urls = countingFetch();
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true }, { globalState: { 'traecnquota.lastCheckinSuccessDate': today } });
+  const ext = freshRequire();
+  ext.activate(activeStub.context);
+  await settle();
+  assert.strictEqual(claimsOf(urls).length, 0, '今天签过就不该再发 claim');
+  assert.strictEqual(urls.length > 0, true, '积分刷新照常进行');
+  ext.deactivate(); // 当天已签成 → 不该存在兜底定时器，deactivate 只是幂等收口
+  globalThis.fetch = undefined;
+});
+
+test('关掉自动签到后不发 claim，但手动命令仍能签', async () => {
+  const urls = countingFetch();
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: false });
+  const ext = freshRequire();
+  ext.activate(activeStub.context);
+  await settle();
+  assert.strictEqual(claimsOf(urls).length, 0);
+  await activeStub.commands.get('traecnquota.checkin')();
+  await settle();
+  assert.strictEqual(claimsOf(urls).length, 1, '手动签到命令要能绕过日期守卫之外的关闭态');
+  ext.deactivate();
+  globalThis.fetch = undefined;
+});
+
+test('claim 失败时弹错误通知，且不写成功日期，下次刷新还能重试', async () => {
+  const urls = countingFetch();
+  globalThis.fetch = async url => {
+    const u = String(url);
+    urls.push(u);
+    if (u.includes('checkin_credits/claim')) {
+      return { status: 200, text: async () => JSON.stringify({ code: 500, message: '服务繁忙' }) };
+    }
+    return { status: 200, text: async () => JSON.stringify(u.includes('checkin') ? { enable: true, checked_in: false } : usageBody) };
+  };
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true });
+  const ext = freshRequire();
+  ext.activate(activeStub.context);
+  await settle();
+  assert.strictEqual(activeStub.getGlobalState('traecnquota.lastCheckinSuccessDate'), undefined, '失败不能记成成功');
+  assert.strictEqual(activeStub.calls.error.filter(m => /签到失败/.test(m)).length >= 1, true, '失败要弹错误通知');
+  ext.deactivate(); // 签失败会留下兜底定时器，不收掉测试进程会一直等下去
+  globalThis.fetch = undefined;
+});
+
+test('签到通知里不出现领取积分数值', async () => {
+  countingFetch();
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true });
+  const ext = freshRequire();
+  ext.activate(activeStub.context);
+  await settle();
+  const all = activeStub.calls.info.join('\n');
+  assert.strictEqual(/\d+\s*积分/.test(all), false, '按产品要求不显示领了多少积分');
+  ext.deactivate();
+  globalThis.fetch = undefined;
+});
+
+test('接口正文只进输出面板，签到失败的 toast 与 tooltip 里都不留正文', async () => {
+  const urls = countingFetch();
+  globalThis.fetch = async url => {
+    const u = String(url);
+    urls.push(u);
+    if (u.includes('checkin_credits/claim')) {
+      return { status: 500, text: async () => '[重新激活账号](https://evil.example/x)' };
+    }
+    return { status: 200, text: async () => JSON.stringify(u.includes('checkin') ? { enable: true, checked_in: false } : usageBody) };
+  };
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true });
+  const ext = freshRequire();
+  ext.activate(activeStub.context);
+  await settle();
+  assert.ok(activeStub.calls.error.some(m => /签到失败/.test(m)), '失败要弹错误通知');
+  const toasts = activeStub.calls.error.join('\n');
+  assert.doesNotMatch(toasts, /evil\.example|重新激活账号/, 'toast 里不能有接口正文');
+  assert.doesNotMatch(String(activeStub.statusItems[0].tooltip), /evil\.example/, 'tooltip 同样不能');
+  assert.match(String(activeStub.statusItems[0].text), /1,500/, '签到挂了不影响积分照常展示');
+  assert.ok(activeStub.logs.some(l => /接口返回：.*链接已隐去|接口返回/.test(l)), '正文线索留在输出面板');
+  ext.deactivate();
+  globalThis.fetch = undefined;
+});
+
+test('claim 正在飞的时候重复触发不会叠加第二次请求', async () => {
+  const urls = countingFetch();
+  let release;
+  const gate = new Promise(r => { release = r; });
+  globalThis.fetch = async url => {
+    const u = String(url);
+    urls.push(u);
+    if (u.includes('checkin_credits/claim')) {
+      await gate; // claim 挂住期间，refreshing 锁已释放，手动命令能立刻进来
+    }
+    return { status: 200, text: async () => JSON.stringify(u.includes('checkin') ? { enable: true, checked_in: false } : usageBody) };
+  };
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true });
+  const ext = freshRequire();
+  ext.activate(activeStub.context);
+  await settle();
+  assert.strictEqual(claimsOf(urls).length, 1, '启动刷新已经发起一次 claim');
+  await activeStub.commands.get('traecnquota.checkin')();
+  await settle();
+  assert.strictEqual(claimsOf(urls).length, 1, '同一时刻只允许一次 claim');
+  release();
+  await settle();
+  assert.strictEqual(claimsOf(urls).length, 1, '放锁后也不该补发');
+  ext.deactivate();
   globalThis.fetch = undefined;
 });

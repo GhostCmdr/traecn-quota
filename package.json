@@ -46,6 +46,10 @@
         "title": "TraeCN Quota: 刷新积分"
       },
       {
+        "command": "traecnquota.checkin",
+        "title": "TraeCN Quota: 立即签到"
+      },
+      {
         "command": "traecnquota.clearManualToken",
         "title": "TraeCN Quota: 清除保管箱里的手动 Token"
       }

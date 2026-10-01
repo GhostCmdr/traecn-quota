@@ -1,9 +1,12 @@
 import * as vscode from 'vscode';
 import { loadAuth, loadAuthFromToken, normalizeApiHost, TraeAuth, editionLabel } from './auth';
-import { CreditPack, CreditsSummary, fetchCheckinStatus, fetchCredits } from './api';
+import { CreditPack, CreditsSummary, fetchCheckinStatus, fetchCredits, claimCheckin } from './api';
+import { shouldClaim, todayString } from './checkin';
 
 let statusBar: vscode.StatusBarItem;
 let output: vscode.OutputChannel;
+/** activate() 的上下文要留给 refresh() 之后的签到路径用（写 globalState 的日期守卫） */
+let extContext: vscode.ExtensionContext | undefined;
 
 let refreshTimer: NodeJS.Timeout | undefined;
 
@@ -21,13 +24,21 @@ let checkinStateText = '';
 let checkinStateDay = '';
 /** 输出面板里的签到记录，带日期 */
 let checkinNote = '';
+/** globalState 里「最近一次签到成功的日期」的键名 */
+const LAST_CHECKIN_DATE_KEY = 'traecnquota.lastCheckinSuccessDate';
+/** 当天兜底定时器：只在「今天还没签成」时排到次日凌晨，签成功即销毁 */
+let checkinTimer: NodeJS.Timeout | undefined;
+/** 同一时刻只允许一次 claim，避免启动刷新与手动命令叠加 */
+let claiming = false;
 
 /** 悬浮窗明细行数的默认值，与 package.json 里 traecnquota.detailRows 的 default 保持一致 */
 const DEFAULT_DETAIL_ROWS = 3;
 /** 自动刷新间隔（分钟）的默认值与上限，与 package.json 里 default/maximum 保持一致 */
 const DEFAULT_REFRESH_MINUTES = 30;
 const MAX_REFRESH_MINUTES = 1440;
-/** 改了必须重新取数的设置项；不在此列的（detailRows）只需按上一次数据重绘 */
+/** 自动签到的默认开关，与 package.json 里 traecnquota.autoCheckin 的 default 保持一致 */
+const DEFAULT_AUTO_CHECKIN = true;
+/** 改了必须重新取数的设置项；不在此列的（detailRows、autoCheckin）只需按上一次数据重绘或不影响渲染 */
 const REFRESH_KEYS = ['edition', 'hostOverride', 'manualToken', 'refreshInterval'];
 
 /** 手动 token 在加密保管箱里的键名 */
@@ -642,6 +653,9 @@ async function refresh(verbose: boolean, preResolved?: TraeAuth): Promise<void> 
         `TraeCN 积分余额：剩余 ${fmtQuota(summary.remaining, summary.unlimited)}，已用 ${summary.used.toFixed(2)}`
       );
     }
+    // 积分取到手顺带处理签到：放在成功分支里，登录态不可用时不该多发一次无谓请求。
+    // maybeAutoClaim 自带日期守卫，当天签过就是空操作，不会与本函数递归。
+    await maybeAutoClaim();
   } catch (err) {
     const api = err as Partial<import('./api').ApiError>;
     let message = messageOf(err);
@@ -687,6 +701,78 @@ async function refreshCheckinState(auth: TraeAuth): Promise<void> {
   }
 }
 
+/**
+ * 领一次签到。成功才写日期守卫，失败保持原样让下一次刷新自然重试；成败都弹通知（产品定稿）。
+ */
+async function tryClaim(): Promise<void> {
+  if (claiming) {
+    // claim 锁与刷新锁是两把：refresh 的 finally 先跑，此时自动 claim 还在飞，手动命令能进来。
+    // 这里合并而不是排队——重复弹窗才是打扰，而服务端本就幂等，第二次没有任何收益。
+    return;
+  }
+  claiming = true;
+  try {
+    const auth = await resolveAuth();
+    await claimCheckin(auth);
+    await extContext?.globalState.update(LAST_CHECKIN_DATE_KEY, todayString());
+    clearCheckinTimer();
+    log(`${todayString()} 签到成功`);
+    vscode.window.showInformationMessage('TraeCN 签到成功');
+    // 不在这里再调 refresh()：那会经 maybeAutoClaim 回到 tryClaim 形成回环。
+    // 自动路径的积分刷新本来就在同一轮 refresh 里已经取过；手动命令则交给下一次定时刷新反映新余额。
+  } catch (err) {
+    const message = messageOf(err);
+    const remoteDetail = (err as Partial<import('./api').ApiError>).remoteDetail;
+    // 接口正文只进输出面板，toast 里只留用户可读的那半句
+    log(`${todayString()} 签到失败：${message}${remoteDetail ? `｜接口返回：${remoteDetail}` : ''}`);
+    vscode.window.showErrorMessage(`TraeCN 签到失败：${message}`);
+    scheduleCheckinRetry();
+  } finally {
+    claiming = false;
+  }
+}
+
+/** 自动路径的唯一入口：先看开关，再看日期守卫，都不通过才发请求 */
+async function maybeAutoClaim(): Promise<void> {
+  if (!autoCheckinEnabled()) {
+    return;
+  }
+  const today = todayString();
+  if (!shouldClaim(extContext?.globalState.get<string>(LAST_CHECKIN_DATE_KEY), today)) {
+    return;
+  }
+  await tryClaim();
+}
+
+function autoCheckinEnabled(): boolean {
+  const raw = cfg().get<unknown>('autoCheckin');
+  // 与 refreshInterval 同样的宽容策略：手改成非法值不静默变成关闭，按默认开启处理
+  return typeof raw === 'boolean' ? raw : DEFAULT_AUTO_CHECKIN;
+}
+
+/**
+ * 编辑器一直开着跨过零点时，靠这个定时器补签。
+ * 只在「当天还没签成」时存在，全天最多醒一次，签成功即销毁——不做任何轮询。
+ */
+function scheduleCheckinRetry(): void {
+  clearCheckinTimer();
+  const now = new Date();
+  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 5, 0);
+  // 跨过零点后才被排上时 next 会落到后天，delay 只会偏长不会偏短；下限兜住时钟回拨之类的异常
+  const delayMs = Math.max(next.getTime() - now.getTime(), 60_000);
+  checkinTimer = setTimeout(() => {
+    checkinTimer = undefined;
+    void maybeAutoClaim();
+  }, delayMs);
+}
+
+function clearCheckinTimer(): void {
+  if (checkinTimer) {
+    clearTimeout(checkinTimer);
+    checkinTimer = undefined;
+  }
+}
+
 /** 定时器间隔必须是个正经数字：手改成 "abc"/true 会让 setInterval 退化成名 1ms 的循环，把接口打爆 */
 function refreshIntervalMinutes(): number {
   const raw = cfg().get<unknown>('refreshInterval');
@@ -718,6 +804,7 @@ function scheduleRefresh(): void {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  extContext = context;
   secretStore = context.secrets;
   output = vscode.window.createOutputChannel('TraeCN 积分余额');
   // 失败原因里会带上接口返回的片段，用户常整段截图外发，先提示一次
@@ -732,6 +819,7 @@ export function activate(context: vscode.ExtensionContext): void {
     output,
     statusBar,
     vscode.commands.registerCommand('traecnquota.refresh', () => refresh(true)),
+    vscode.commands.registerCommand('traecnquota.checkin', () => tryClaim()),
     vscode.commands.registerCommand('traecnquota.clearManualToken', () => clearManualToken()),
     vscode.window.onDidChangeActiveColorTheme(() => {
       // SVG 配色是写死的，换主题必须重绘，否则浅色主题下会白字白底
@@ -775,6 +863,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
   scheduleRefresh();
 
+  // 冷启动补偿：当天还没签成（比如编辑器整天没开过）时排一次次日凌晨的兜底，签成功即销毁
+  if (autoCheckinEnabled() && shouldClaim(context.globalState.get<string>(LAST_CHECKIN_DATE_KEY), todayString())) {
+    scheduleCheckinRetry();
+  }
+
   void (async () => {
     await sweepManualToken();
     const auth = await resolveAuth().catch(() => undefined);
@@ -791,4 +884,5 @@ export function deactivate(): void {
   if (refreshTimer) {
     clearInterval(refreshTimer);
   }
+  clearCheckinTimer();
 }
