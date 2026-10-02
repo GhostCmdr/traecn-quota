@@ -22,3 +22,9 @@ tsconfig.json
 .codeartsdoer/**
 .codegraph
 .codegraph/**
+
+# 同一类坑：漏了下面几行，本机打的包会带上内部审查文档（progress.md、任务简报、
+# 各任务报告、review diff）和变异测试没清掉的 extension.mut.js，人工提交时市场审阅人解压就能看见。
+.superpowers
+.superpowers/**
+**/*.mut.js
