@@ -470,6 +470,11 @@ export function gearIconUri(color: string): string {
  * 悬浮窗数据体 SVG（透明背景）：大数字+分母 / 百分比胶囊 / 进度条 /
  * 明细三列表（表头下 + 每行下均有分隔线）/ 签到页脚。
  */
+/** Trae 系宿主（appName 含 trae）的 tooltip 不给行内图补下方 padding，SVG 要自补，返回 0；其余宿主 9 */
+export function footerHostPad(appName: string | undefined): number {
+  return /trae/i.test(appName ?? '') ? 0 : 9;
+}
+
 export function buildTooltipBody(
   packs: CreditPack[],
   summary: CreditsSummary,
@@ -508,9 +513,8 @@ export function buildTooltipBody(
   const footBase = lastRowBot + STEP * 2 + TXT_ASC;
   // TraeCN 的 tooltip 容器不像 VS Code 那样给行内图下方补 padding（双宿主真机实测 2026-10-02，
   // VS Code B≈12 / TraeCN B≈4-5），所以 Trae 系宿主要把这 9px 留在 SVG 内部，否则页脚贴底。
-  // 识别用 appName 含 "trae"；若 Trae 改名会静默退回紧凑间距，不会报错。
   // env 用可选链：preview 主题检查脚本给的是极简 vscode 桩（没有 env）， undefined 会测 "undefined" 回落 VS Code 路径
-  const hostPad = /trae/i.test(vscode.env?.appName) ? 0 : 9;
+  const hostPad = footerHostPad(vscode.env?.appName);
   const H = footBase + TXT_DESC + STEP - hostPad;
 
   const pct = pctOf(summary);
@@ -899,6 +903,8 @@ export function activate(context: vscode.ExtensionContext): void {
   void (async () => {
     await sweepManualToken();
     const auth = await resolveAuth().catch(() => undefined);
+    // 宿主识别诊断：页脚底距按 appName 分流，若 TraeCN 上间距仍不对，先看这行的实际值
+    log(`宿主 appName="${vscode.env.appName}"，页脚底距补偿=${footerHostPad(vscode.env.appName)}px`);
     if (auth && timesUp(auth.expiredAt)) {
       log(`登录态已过期（${new Date(auth.expiredAt as string).toLocaleString()}），请重新登录 Trae 客户端`);
     } else if (auth) {

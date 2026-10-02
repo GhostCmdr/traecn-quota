@@ -1078,6 +1078,16 @@ test('当天已签成功后再点手动命令：不发 claim，积分照常刷�
   assert.strictEqual(activeStub.calls.info.some(m => /签到成功/.test(m)), false, '不能再弹「签到成功」');
 });
 
+test('footerHostPad：Trae 系宿主 SVG 自补底距（0），VS Code 走宿主 padding（9）', () => {
+  const { footerHostPad } = freshRequire();
+  assert.strictEqual(footerHostPad('Trae CN'), 0);
+  assert.strictEqual(footerHostPad('TRAE SOLO CN'), 0);
+  assert.strictEqual(footerHostPad('TraeCode CN'), 0);
+  assert.strictEqual(footerHostPad('Visual Studio Code'), 9);
+  assert.strictEqual(footerHostPad('Cursor'), 9);
+  assert.strictEqual(footerHostPad(undefined), 9);
+});
+
 /**
  * 产品默认是「开」（package.json 的 default: true）。这条不传 autoCheckin，
  * 走的就是真实用户装好插件那一刻的路径：默认开启 + 默认开启时的请求预算。
