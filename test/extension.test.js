@@ -6,11 +6,12 @@ const fs = require('fs');
 
 const OUT = path.resolve(__dirname, '..', 'out');
 
+/**
+ * 产品默认 autoCheckin 为 true（package.json 的 default），桩工厂照此默认，不做任何测试侧改写。
+ * 「一轮启动 = 几个请求」这类计数用例与签到无关却会被默认开启的 claim 打乱（还多一份排到次日凌晨的兜底定时器），
+ * 所以它们走 makeStubCheckinOff —— 关闭态在用例名一眼可见，而不是藏在工厂里。
+ */
 function makeVscodeStub(initialConfig = {}, options = {}) {
-  // 现有用例盯着的是「一次刷新 = 积分 + 签到状态两个请求」这个既有契约，而自动签到默认开启
-  // 会给每轮再加一个 claim、并留下排到次日凌晨的兜底定时器把测试进程吊住。
-  // 那些用例与签到无关，这里默认替它们关掉（等同用户把开关拨到关）；签到自身的用例显式传 true。
-  initialConfig = { autoCheckin: false, ...initialConfig };
   const config = {};
   /** 模拟的各作用区设置值；initialConfig 视作全局层，生效值按 workspaceFolder > workspace > global 取 */
   const scopes = {
@@ -26,6 +27,8 @@ function makeVscodeStub(initialConfig = {}, options = {}) {
   const secrets = new Map();
   /** 模拟 globalState：签到日期守卫靠它跨重启记住「今天签过没」。options.globalState 是普通对象，得先取 entries */
   const globalStateMap = new Map(Object.entries(options.globalState || {}));
+  /** 用例跑到一半再打坏 memento 读取用：模拟 globalState 存储层出问题这类 tryClaim 之外的抛出点 */
+  let stateGetThrows = false;
   const storeFail = options.storeFail;
   /** 让保管箱读取抛错 / 永不返回，模拟系统钥匙串拒绝与授权框挂住 */
   const getFail = options.getFail;
@@ -112,11 +115,17 @@ function makeVscodeStub(initialConfig = {}, options = {}) {
   return {
     vscode, calls, commands, statusItems, secrets, logs,
     getGlobalState: key => globalStateMap.get(key),
+    setGlobalStateGetThrows(value) { stateGetThrows = value; },
     /** activate() 要用的 ExtensionContext 替身 */
     context: {
       subscriptions: [],
       globalState: {
-        get: key => globalStateMap.get(key),
+        get: key => {
+          if (stateGetThrows) {
+            throw new Error('globalState 存储层读不出来');
+          }
+          return globalStateMap.get(key);
+        },
         update: async (key, value) => void globalStateMap.set(key, value)
       },
       secrets: {
@@ -151,6 +160,11 @@ function makeVscodeStub(initialConfig = {}, options = {}) {
   };
 }
 
+/** 与签到无关的用桩：把开关显式拨到关，一轮启动的请求预算才回到「积分 + 签到状态」两个 */
+function makeStubCheckinOff(initialConfig = {}, options = {}) {
+  return makeVscodeStub({ autoCheckin: false, ...initialConfig }, options);
+}
+
 const Module = require('module');
 const origLoad = Module._load;
 let activeStub = null;
@@ -168,6 +182,19 @@ function freshRequire() {
     }
   }
   return require(path.join(OUT, 'extension.js'));
+}
+
+/**
+ * activate() 的实例统一在这里收口：deactivate() 销毁排到次日凌晨的签到兜底定时器，
+ * fetch 桩一并卸掉。自动签到默认开启后每个用例都可能留下 ref 着的 timer，
+ * 靠各用例手写 ext.deactivate() 迟早漏一条并把整个测试进程吊住。
+ */
+function withCleanup(t, ext) {
+  t.after(() => {
+    ext.deactivate();
+    globalThis.fetch = undefined;
+  });
+  return ext;
 }
 
 const packOf = (name, limit, used, day) => ({
@@ -242,10 +269,10 @@ function isolateLoginState(tag) {
   };
 }
 
-test('并发刷新被 in-flight 锁合并成一次取数', async () => {
+test('并发刷新被 in-flight 锁合并成一次取数', async t => {
   const urls = countingFetch();
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   const before = urls.length;
@@ -259,10 +286,10 @@ test('并发刷新被 in-flight 锁合并成一次取数', async () => {
   globalThis.fetch = undefined;
 });
 
-test('锁释放后仍可再次刷新', async () => {
+test('锁释放后仍可再次刷新', async t => {
   const urls = countingFetch();
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   const first = urls.length;
@@ -272,10 +299,10 @@ test('锁释放后仍可再次刷新', async () => {
   globalThis.fetch = undefined;
 });
 
-test('只改 detailRows 时免网络重绘，明细行数立刻生效', async () => {
+test('只改 detailRows 时免网络重绘，明细行数立刻生效', async t => {
   const urls = countingFetch();
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   const before = urls.length;
@@ -291,10 +318,10 @@ test('只改 detailRows 时免网络重绘，明细行数立刻生效', async ()
   globalThis.fetch = undefined;
 });
 
-test('改凭证类设置必须重新拉取', async () => {
+test('改凭证类设置必须重新拉取', async t => {
   const urls = countingFetch();
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   const before = urls.length;
@@ -307,10 +334,10 @@ test('改凭证类设置必须重新拉取', async () => {
   globalThis.fetch = undefined;
 });
 
-test('401 时状态栏降级；手动刷新才弹错误提示', async () => {
+test('401 时状态栏降级；手动刷新才弹错误提示', async t => {
   globalThis.fetch = async () => ({ status: 401, text: async () => '' });
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.match(activeStub.statusItems[0].text, /TraeCN --/, '启动失败只降级状态栏，不打扰');
@@ -320,12 +347,12 @@ test('401 时状态栏降级；手动刷新才弹错误提示', async () => {
   globalThis.fetch = undefined;
 });
 
-test('没有任何可用登录态时，直说未找到，不伪装成 401，也不发请求', async () => {
+test('没有任何可用登录态时，直说未找到，不伪装成 401，也不发请求', async t => {
   // 把 APPDATA 指到一个空目录：两个国内版客户端都「不存在」，且不依赖本机真实登录态
   const isolate = isolateLoginState('none');
   const urls = countingFetch();
-  activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   const tip = String(activeStub.statusItems[0].tooltip);
@@ -337,7 +364,7 @@ test('没有任何可用登录态时，直说未找到，不伪装成 401，也�
   globalThis.fetch = undefined;
 });
 
-test('刷新失败后切主题不会用旧数据盖掉错误提示', async () => {
+test('刷新失败后切主题不会用旧数据盖掉错误提示', async t => {
   let mode = 'ok';
   globalThis.fetch = async url => {
     if (String(url).includes('checkin')) {
@@ -347,8 +374,8 @@ test('刷新失败后切主题不会用旧数据盖掉错误提示', async () =>
       ? { status: 200, text: async () => JSON.stringify(usageBody) }
       : { status: 500, text: async () => 'boom' };
   };
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.strictEqual(dataRows(bodySvgOf(activeStub)), 3, '先确认成功渲染过');
@@ -365,12 +392,12 @@ test('刷新失败后切主题不会用旧数据盖掉错误提示', async () =>
   globalThis.fetch = undefined;
 });
 
-test('跨天后的旧签到状态不会冒充今天的（页脚回落为「签到未查询」）', async () => {
+test('跨天后的旧签到状态不会冒充今天的（页脚回落为「签到未查询」）', async t => {
   globalThis.fetch = async url => String(url).includes('checkin')
     ? { status: 200, text: async () => JSON.stringify({ enable: true, checked_in: true }) }
     : { status: 200, text: async () => JSON.stringify(usageBody) };
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.match(bodySvgOf(activeStub), /今日已签到/, '先确认今天查到的是已签到');
@@ -392,28 +419,28 @@ test('跨天后的旧签到状态不会冒充今天的（页脚回落为「签�
   globalThis.fetch = undefined;
 });
 
-test('detailRows 被手改成非法值时回落到默认 3 行，而不是空表', async () => {
+test('detailRows 被手改成非法值时回落到默认 3 行，而不是空表', async t => {
   globalThis.fetch = async url => (String(url).includes('checkin')
     ? { status: 200, text: async () => JSON.stringify({ enable: true, checked_in: false }) }
     : { status: 200, text: async () => JSON.stringify(usageBody) });
   for (const [bad, want] of [['abc', 3], [{}, 3], [null, 3], [0, 2], [-5, 2], [99, 3], ['2', 2]]) {
-    activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: bad, refreshInterval: 0 });
-    freshRequire().activate(activeStub.context);
+    activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: bad, refreshInterval: 0 });
+    withCleanup(t, freshRequire()).activate(activeStub.context);
     await settle();
     assert.strictEqual(dataRows(bodySvgOf(activeStub)), want, `detailRows=${JSON.stringify(bad)} 应得 ${want} 行`);
   }
   globalThis.fetch = undefined;
 });
 
-test('设置项只是输入口：token 收进保管箱后本项清空，请求头取保管箱里的值', async () => {
+test('设置项只是输入口：token 收进保管箱后本项清空，请求头取保管箱里的值', async t => {
   const seen = [];
   globalThis.fetch = async (url, init) => {
     seen.push(init.headers.Authorization);
     const body = String(url).includes('checkin') ? { enable: true, checked_in: false } : usageBody;
     return { status: 200, text: async () => JSON.stringify(body) };
   };
-  activeStub = makeVscodeStub({ manualToken: 'pasted-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'pasted-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.strictEqual(activeStub.secrets.get('manualToken'), 'pasted-token', 'token 必须进加密保管箱');
@@ -423,10 +450,10 @@ test('设置项只是输入口：token 收进保管箱后本项清空，请求�
   globalThis.fetch = undefined;
 });
 
-test('收走 token 时自己清空设置项的回声，既不再刷一轮，也不能把刚存的 token 删掉', async () => {
+test('收走 token 时自己清空设置项的回声，既不再刷一轮，也不能把刚存的 token 删掉', async t => {
   const urls = countingFetch();
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.strictEqual(urls.length, 2, '一次启动只有积分 + 签到两个请求');
@@ -435,12 +462,12 @@ test('收走 token 时自己清空设置项的回声，既不再刷一轮，也�
   globalThis.fetch = undefined;
 });
 
-test('删空设置项不会动保管箱，只有命令能清除手动 Token', async () => {
+test('删空设置项不会动保管箱，只有命令能清除手动 Token', async t => {
   // 隔离到空 APPDATA：清除后回落到"客户端登录态"这条路必须可判定，不能依赖本机是否装了 Trae
   const isolate = isolateLoginState('clear');
   const urls = countingFetch();
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.strictEqual(activeStub.secrets.get('manualToken'), 'fake-token', '先确认已收进保管箱');
@@ -460,7 +487,7 @@ test('删空设置项不会动保管箱，只有命令能清除手动 Token', as
   globalThis.fetch = undefined;
 });
 
-test('刷新被锁挡住时必须补一轮，不能无声丢掉换凭证的那次变更', async () => {
+test('刷新被锁挡住时必须补一轮，不能无声丢掉换凭证的那次变更', async t => {
   let release;
   const gate = new Promise(resolve => { release = resolve; });
   const urls = [];
@@ -472,9 +499,9 @@ test('刷新被锁挡住时必须补一轮，不能无声丢掉换凭证的那�
     const body = String(url).includes('checkin') ? { enable: true, checked_in: false } : usageBody;
     return { status: 200, text: async () => JSON.stringify(body) };
   };
-  activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0 });
+  activeStub = makeStubCheckinOff({ detailRows: 3, refreshInterval: 0 });
   activeStub.seedSecret('manualToken', 'first-token');
-  const ext = freshRequire();
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
 
@@ -488,15 +515,15 @@ test('刷新被锁挡住时必须补一轮，不能无声丢掉换凭证的那�
   globalThis.fetch = undefined;
 });
 
-test('refreshInterval 被手改成非数字时，不会退化成名 1ms 的循环打接口', async () => {
+test('refreshInterval 被手改成非数字时，不会退化成名 1ms 的循环打接口', async t => {
   const urls = [];
   globalThis.fetch = async url => {
     urls.push(String(url));
     const body = String(url).includes('checkin') ? { enable: true, checked_in: false } : usageBody;
     return { status: 200, text: async () => JSON.stringify(body) };
   };
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 'abc' });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 'abc' });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await new Promise(resolve => setTimeout(resolve, 150));
   assert.ok(urls.length <= 2, `轮询间隔退化了：150ms 内观测到 ${urls.length} 次请求`);
@@ -504,10 +531,10 @@ test('refreshInterval 被手改成非数字时，不会退化成名 1ms 的循�
   globalThis.fetch = undefined;
 });
 
-test('免网络重绘沿用取数时刻，不把「更新」时间悄悄改成重绘时刻', async () => {
+test('免网络重绘沿用取数时刻，不把「更新」时间悄悄改成重绘时刻', async t => {
   countingFetch();
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   const stampOf = svg => (svg.match(/更新 ([^<]+)/) || [])[1];
@@ -520,7 +547,7 @@ test('免网络重绘沿用取数时刻，不把「更新」时间悄悄改成�
   globalThis.fetch = undefined;
 });
 
-test('保管箱里已有 token 时，设置项留空照样能取数', async () => {
+test('保管箱里已有 token 时，设置项留空照样能取数', async t => {
   const authHeader = [];
   const urls = [];
   globalThis.fetch = async (url, init) => {
@@ -529,8 +556,8 @@ test('保管箱里已有 token 时，设置项留空照样能取数', async () =
     const body = String(url).includes('checkin') ? { enable: true, checked_in: false } : usageBody;
     return { status: 200, text: async () => JSON.stringify(body) };
   };
-  activeStub = makeVscodeStub({ manualToken: 'stored-once', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'stored-once', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.ok(!activeStub.getConfig('manualToken'), '首轮就该收走');
@@ -542,16 +569,16 @@ test('保管箱里已有 token 时，设置项留空照样能取数', async () =
   globalThis.fetch = undefined;
 });
 
-test('保管箱里已有 token 时又填了新的：以新填的为准并覆盖保管箱', async () => {
+test('保管箱里已有 token 时又填了新的：以新填的为准并覆盖保管箱', async t => {
   const seen = [];
   globalThis.fetch = async (url, init) => {
     seen.push(init.headers.Authorization);
     const body = String(url).includes('checkin') ? { enable: true, checked_in: false } : usageBody;
     return { status: 200, text: async () => JSON.stringify(body) };
   };
-  activeStub = makeVscodeStub({ manualToken: 'brand-new', detailRows: 3, refreshInterval: 0 });
+  activeStub = makeStubCheckinOff({ manualToken: 'brand-new', detailRows: 3, refreshInterval: 0 });
   activeStub.seedSecret('manualToken', 'old-token');
-  const ext = freshRequire();
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.strictEqual(activeStub.secrets.get('manualToken'), 'brand-new', '设置项是输入口，填了就覆盖旧值');
@@ -559,12 +586,12 @@ test('保管箱里已有 token 时又填了新的：以新填的为准并覆盖�
   globalThis.fetch = undefined;
 });
 
-test('token 填在工作区设置里也会被收走，两个作用区的明文都清掉', async () => {
+test('token 填在工作区设置里也会被收走，两个作用区的明文都清掉', async t => {
   countingFetch();
-  activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0 }, {
+  activeStub = makeStubCheckinOff({ detailRows: 3, refreshInterval: 0 }, {
     scopes: { workspace: { manualToken: 'ws-token' }, global: { manualToken: 'global-token' } }
   });
-  const ext = freshRequire();
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   // 生效值是工作区那份，收走的也必须是它
@@ -574,11 +601,11 @@ test('token 填在工作区设置里也会被收走，两个作用区的明文�
   globalThis.fetch = undefined;
 });
 
-test('保管箱写不进去时不崩，回落到客户端登录态并报未找到', async () => {
+test('保管箱写不进去时不崩，回落到客户端登录态并报未找到', async t => {
   const isolate = isolateLoginState('storefail');
   const urls = countingFetch();
-  activeStub = makeVscodeStub({ manualToken: 'x', detailRows: 3, refreshInterval: 0 }, { storeFail: true });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'x', detailRows: 3, refreshInterval: 0 }, { storeFail: true });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.strictEqual(urls.length, 0, '拿不到凭证就不该发请求');
@@ -587,11 +614,11 @@ test('保管箱写不进去时不崩，回落到客户端登录态并报未找�
   globalThis.fetch = undefined;
 });
 
-test('edition 被手改成无法识别的值时，直接指出是这个设置写错了', async () => {
+test('edition 被手改成无法识别的值时，直接指出是这个设置写错了', async t => {
   const isolate = isolateLoginState('badedition');
   countingFetch();
-  activeStub = makeVscodeStub({ edition: 'trae', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ edition: 'trae', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   const tip = String(activeStub.statusItems[0].tooltip);
@@ -601,16 +628,16 @@ test('edition 被手改成无法识别的值时，直接指出是这个设置写
   globalThis.fetch = undefined;
 });
 
-test('edition 里被塞进 Markdown 链接时，原值不回显、tooltip 里拼不出可点构造', async () => {
+test('edition 里被塞进 Markdown 链接时，原值不回显、tooltip 里拼不出可点构造', async t => {
   const isolate = isolateLoginState('inject');
   countingFetch();
   // settings.json 是用户/别的进程手可改的，这里的值会流经 Error → tooltip → toast
-  activeStub = makeVscodeStub({
+  activeStub = makeStubCheckinOff({
     edition: '[点我重新激活](https://evil.example/x) ![x](http://10.0.0.1/a.png)',
     detailRows: 3,
     refreshInterval: 0
   });
-  const ext = freshRequire();
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   const tip = String(activeStub.statusItems[0].tooltip);
@@ -621,15 +648,15 @@ test('edition 里被塞进 Markdown 链接时，原值不回显、tooltip 里拼
   globalThis.fetch = undefined;
 });
 
-test('登录态过期导致的 401 要说清是过期，而不是笼统的认证失败', async () => {
+test('登录态过期导致的 401 要说清是过期，而不是笼统的认证失败', async t => {
   const isolate = isolateLoginState('expired');
   const dir = isolate.storageJson('Trae CN');
   // storage.json 里存明文 JSON 也是合法格式（国际版就是这么存的），省得再造一份 tc 密文
   const login = { token: 'expired-jwt', userId: '42', host: 'https://api.trae.cn', expiredAt: '2020-01-01T00:00:00.000Z' };
   fs.writeFileSync(dir, JSON.stringify({ 'iCubeAuthInfo://icube.cloudide': JSON.stringify(login) }), 'utf8');
   globalThis.fetch = async () => ({ status: 401, text: async () => '' });
-  activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   const tip = String(activeStub.statusItems[0].tooltip);
@@ -640,12 +667,12 @@ test('登录态过期导致的 401 要说清是过期，而不是笼统的认证
   globalThis.fetch = undefined;
 });
 
-test('接口正文只进输出面板，不进 tooltip 和 toast', async () => {
+test('接口正文只进输出面板，不进 tooltip 和 toast', async t => {
   globalThis.fetch = async url => String(url).includes('checkin')
     ? { status: 200, text: async () => JSON.stringify({ enable: true, checked_in: false }) }
     : { status: 500, text: async () => '[重新激活账号](https://evil.example/x)' };
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   const tip = String(activeStub.statusItems[0].tooltip);
@@ -657,15 +684,15 @@ test('接口正文只进输出面板，不进 tooltip 和 toast', async () => {
   globalThis.fetch = undefined;
 });
 
-test('登录态结构不认识时报清楚，且不把脏值带进请求', async () => {
+test('登录态结构不认识时报清楚，且不把脏值带进请求', async t => {
   const isolate = isolateLoginState('badshape');
   const dir = isolate.storageJson('Trae CN');
   fs.writeFileSync(dir, JSON.stringify({
     'iCubeAuthInfo://icube.cloudide': JSON.stringify({ token: 12345, userId: { nested: 1 } })
   }), 'utf8');
   const urls = countingFetch();
-  activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.match(String(activeStub.statusItems[0].tooltip), /没有可用的 accessToken/, '要指出是 accessToken 这一项坏了');
@@ -674,7 +701,7 @@ test('登录态结构不认识时报清楚，且不把脏值带进请求', async
   globalThis.fetch = undefined;
 });
 
-test('保管箱读取报错时回落到客户端登录态，而不是整轮失败', async () => {
+test('保管箱读取报错时回落到客户端登录态，而不是整轮失败', async t => {
   const isolate = isolateLoginState('getfail');
   fs.writeFileSync(isolate.storageJson('Trae CN'), JSON.stringify({
     'iCubeAuthInfo://icube.cloudide': JSON.stringify({ token: 'client-token', userId: '42', host: 'https://api.trae.cn' })
@@ -684,9 +711,9 @@ test('保管箱读取报错时回落到客户端登录态，而不是整轮失�
     heads.push(init.headers.Authorization);
     return { status: 200, text: async () => JSON.stringify(String(url).includes('checkin') ? { enable: true, checked_in: false } : usageBody) };
   };
-  activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0 }, { getFail: 'keychain unavailable' });
+  activeStub = makeStubCheckinOff({ detailRows: 3, refreshInterval: 0 }, { getFail: 'keychain unavailable' });
   activeStub.seedSecret('manualToken', 'vault-token');
-  const ext = freshRequire();
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.strictEqual(heads.length, 2, '钥匙串读不出来也得把数取回来');
@@ -697,7 +724,7 @@ test('保管箱读取报错时回落到客户端登录态，而不是整轮失�
   globalThis.fetch = undefined;
 });
 
-test('保管箱读取挂住时按超时放行，刷新锁不能把状态栏永久钉在「刷新中」', async () => {
+test('保管箱读取挂住时按超时放行，刷新锁不能把状态栏永久钉在「刷新中」', async t => {
   mock.timers.enable({ apis: ['setTimeout'] });
   try {
     const isolate = isolateLoginState('gethang');
@@ -709,9 +736,9 @@ test('保管箱读取挂住时按超时放行，刷新锁不能把状态栏永�
       heads.push(init.headers.Authorization);
       return { status: 200, text: async () => JSON.stringify(String(url).includes('checkin') ? { enable: true, checked_in: false } : usageBody) };
     };
-    activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0 }, { getHang: true });
+    activeStub = makeStubCheckinOff({ detailRows: 3, refreshInterval: 0 }, { getHang: true });
     activeStub.seedSecret('manualToken', 'vault-token');
-    const ext = freshRequire();
+    const ext = withCleanup(t, freshRequire());
     ext.activate(activeStub.context);
     await settle();
     assert.strictEqual(heads.length, 0, '挂住期间发不出请求');
@@ -734,15 +761,15 @@ test('保管箱读取挂住时按超时放行，刷新锁不能把状态栏永�
   }
 });
 
-test('不限量积分包：状态栏与悬浮窗显示 ∞ 和「不限量」，不是 0 / 0', async () => {
+test('不限量积分包：状态栏与悬浮窗显示 ∞ 和「不限量」，不是 0 / 0', async t => {
   globalThis.fetch = async url => ({
     status: 200,
     text: async () => JSON.stringify(String(url).includes('checkin')
       ? { enable: true, checked_in: true }
       : { user_entitlement_pack_list: [packOf('赠送包', -1, 5, 1)] })
   });
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.strictEqual(activeStub.statusItems[0].text, '$(trae-sparkle) ∞');
@@ -752,15 +779,15 @@ test('不限量积分包：状态栏与悬浮窗显示 ∞ 和「不限量」，
   globalThis.fetch = undefined;
 });
 
-test('不限量与有限额包并存：整体仍按有限额算占比，只有那一行是 ∞', async () => {
+test('不限量与有限额包并存：整体仍按有限额算占比，只有那一行是 ∞', async t => {
   globalThis.fetch = async url => ({
     status: 200,
     text: async () => JSON.stringify(String(url).includes('checkin')
       ? { enable: true, checked_in: false }
       : { user_entitlement_pack_list: [packOf('赠送包', -1, 5, 1), packOf('月度包', 1000, 200, 2)] })
   });
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.strictEqual(activeStub.statusItems[0].text, '$(trae-sparkle) 800 (80%)');
@@ -769,14 +796,14 @@ test('不限量与有限额包并存：整体仍按有限额算占比，只有�
   globalThis.fetch = undefined;
 });
 
-test('hostOverride 只有官方地址会真的生效；写别的地址时一个字节都不发往它', async () => {
+test('hostOverride 只有官方地址会真的生效；写别的地址时一个字节都不发往它', async t => {
   const urls = [];
   globalThis.fetch = async url => {
     urls.push(String(url));
     return { status: 200, text: async () => JSON.stringify(usageBody) };
   };
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, hostOverride: 'https://api.trae.cn' });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, hostOverride: 'https://api.trae.cn' });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.ok(urls.length >= 2, '配置链路要真的发出请求');
@@ -792,7 +819,7 @@ test('hostOverride 只有官方地址会真的生效；写别的地址时一个�
   globalThis.fetch = undefined;
 });
 
-test('清理设置项的窗口期内又落进一份新 token：新值必须被收走，不能当回声吞掉', async () => {
+test('清理设置项的窗口期内又落进一份新 token：新值必须被收走，不能当回声吞掉', async t => {
   const heads = [];
   globalThis.fetch = async (url, init) => {
     heads.push(init.headers.Authorization);
@@ -800,7 +827,7 @@ test('清理设置项的窗口期内又落进一份新 token：新值必须被�
   };
   let harness;
   let injected = false;
-  harness = activeStub = makeVscodeStub({ manualToken: 'first-token', detailRows: 3, refreshInterval: 0 }, {
+  harness = activeStub = makeStubCheckinOff({ manualToken: 'first-token', detailRows: 3, refreshInterval: 0 }, {
     // 「已存进保管箱、正在清空设置项」那几毫秒里用户又粘了一次
     onUpdate: key => {
       if (key === 'manualToken' && !injected) {
@@ -809,7 +836,7 @@ test('清理设置项的窗口期内又落进一份新 token：新值必须被�
       }
     }
   });
-  const ext = freshRequire();
+  const ext = withCleanup(t, freshRequire());
   ext.activate(harness.context);
   await settle();
   assert.strictEqual(harness.secrets.get('manualToken'), 'second-token', '窗口期内的新值不能被吞掉');
@@ -818,18 +845,18 @@ test('清理设置项的窗口期内又落进一份新 token：新值必须被�
   globalThis.fetch = undefined;
 });
 
-test('refreshInterval 写成空值或布尔不是「关闭」：只有显式 0 才停定时器', async () => {
+test('refreshInterval 写成空值或布尔不是「关闭」：只有显式 0 才停定时器', async t => {
   countingFetch();
   for (const bad of ['', true, 'abc']) {
-    activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: bad });
-    const ext = freshRequire();
+    activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: bad });
+    const ext = withCleanup(t, freshRequire());
     ext.activate(activeStub.context);
     await settle();
     assert.ok(!activeStub.logs.some(l => /已关闭积分自动刷新/.test(l)), JSON.stringify(bad) + ' 不该被当成关闭');
     ext.deactivate();
   }
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.ok(activeStub.logs.some(l => /已关闭积分自动刷新/.test(l)), '显式 0 才是关闭');
@@ -837,14 +864,14 @@ test('refreshInterval 写成空值或布尔不是「关闭」：只有显式 0 �
   globalThis.fetch = undefined;
 });
 
-test('服务端把 display_desc 写成数字时按默认名渲染，不能把 TypeError 摆到界面上', async () => {
+test('服务端把 display_desc 写成数字时按默认名渲染，不能把 TypeError 摆到界面上', async t => {
   const body = '{"user_entitlement_pack_list":[{"display_desc":12345,"entitlement_base_info":{"quota":{"credits_limit":1000}},"usage":{"credits_amount":200}}]}';
   globalThis.fetch = async url => ({
     status: 200,
     text: async () => String(url).includes('checkin') ? JSON.stringify({ enable: true, checked_in: false }) : body
   });
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.match(activeStub.statusItems[0].text, /\$\(trae-sparkle\) 800 \(80%\)/, activeStub.statusItems[0].text);
@@ -854,7 +881,7 @@ test('服务端把 display_desc 写成数字时按默认名渲染，不能把 Ty
   globalThis.fetch = undefined;
 });
 
-test('签到请求比积分慢时锁不能提前放手，否则旧签到会盖掉新一轮', async () => {
+test('签到请求比积分慢时锁不能提前放手，否则旧签到会盖掉新一轮', async t => {
   let release;
   const gate = new Promise(r => { release = r; });
   let mode = 'fail';
@@ -869,8 +896,8 @@ test('签到请求比积分慢时锁不能提前放手，否则旧签到会盖�
       ? { status: 500, text: async () => 'boom' }
       : { status: 200, text: async () => JSON.stringify(usageBody) };
   };
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.match(activeStub.statusItems[0].text, /刷新中/, '积分先失败但签到还挂着，这一轮就没结束');
@@ -887,7 +914,7 @@ test('签到请求比积分慢时锁不能提前放手，否则旧签到会盖�
 test('额度显示按量级压缩：1 万以内千分位，1 万~1 亿用 w，1 亿以上用亿', () => {
   // api.js 在加载时就断言全局 fetch 存在，纯格式化测试也要先装桩
   countingFetch();
-  activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0 });
+  activeStub = makeStubCheckinOff({ detailRows: 3, refreshInterval: 0 });
   const ext = freshRequire();
   const table = [
     [0, '0'], [5802, '5,802'], [9999, '9,999'], [10000, '1w'], [15300, '1.5w'],
@@ -900,7 +927,7 @@ test('额度显示按量级压缩：1 万以内千分位，1 万~1 亿用 w，1 
 
 test('名称列格数按额度串实测宽度让位；1 万以内的数据与定稿布局一像素不差', () => {
   countingFetch();
-  activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0 });
+  activeStub = makeStubCheckinOff({ detailRows: 3, refreshInterval: 0 });
   const ext = freshRequire();
   assert.strictEqual(ext.nameCells('2,000 / 2,000'), 10, '定稿数据下 5 个汉字的名称必须原样放得下');
   assert.strictEqual(ext.nameCells('1,202 / 2,000'), 10);
@@ -916,15 +943,15 @@ test('名称列格数按额度串实测宽度让位；1 万以内的数据与定
   globalThis.fetch = undefined;
 });
 
-test('大额度实测：明细行按 w 压缩后渲染，名称与额度两列不重叠', async () => {
+test('大额度实测：明细行按 w 压缩后渲染，名称与额度两列不重叠', async t => {
   globalThis.fetch = async url => ({
     status: 200,
     text: async () => JSON.stringify(String(url).includes('checkin')
       ? { enable: true, checked_in: false }
       : { user_entitlement_pack_list: [packOf('限时活动赠送积分包', 1234567, 234567, 1)] })
   });
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.strictEqual(activeStub.statusItems[0].text, '$(trae-sparkle) 100w (81%)');
@@ -941,47 +968,80 @@ test('大额度实测：明细行按 w 压缩后渲染，名称与额度两列�
 
 const claimsOf = urls => urls.filter(u => u.includes('checkin_credits/claim'));
 
-test('开启自动签到时，刷新会领一次签到并记下今天日期', async () => {
+test('开启自动签到时，刷新会领一次签到并记下今天日期', async t => {
   const urls = countingFetch();
   activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true });
-  const ext = freshRequire();
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.strictEqual(claimsOf(urls).length, 1, '应当恰好发一次 claim');
   assert.match(activeStub.getGlobalState('traecnquota.lastCheckinSuccessDate'), /^\d{4}-\d{2}-\d{2}$/);
   assert.strictEqual(activeStub.calls.info.some(m => /签到成功/.test(m)), true, '成功要弹通知');
-  ext.deactivate(); // 签成后兜底定时器已被销毁，这里只收刷新定时器
-  globalThis.fetch = undefined;
+  // 签成后兜底定时器已被 clearCheckinTimer 销毁，withCleanup 的 deactivate 只收刷新定时器
 });
 
-test('当天已签成功时，再刷新只刷积分不再发 claim', async () => {
+test('当天已签成功时，再刷新只刷积分不再发 claim', async t => {
   const today = new Date().toLocaleDateString('sv');
   const urls = countingFetch();
   activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true }, { globalState: { 'traecnquota.lastCheckinSuccessDate': today } });
-  const ext = freshRequire();
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.strictEqual(claimsOf(urls).length, 0, '今天签过就不该再发 claim');
-  assert.strictEqual(urls.length > 0, true, '积分刷新照常进行');
-  ext.deactivate(); // 当天已签成 → 不该存在兜底定时器，deactivate 只是幂等收口
-  globalThis.fetch = undefined;
+  // 日期守卫拦下的是「要不要领」，不是「要不要查今天签没签」：status 仍每轮查、积分照常取。
+  // 所以这一轮的预算是精确的 2（usage + status），守卫若被改成连状态查询一起跳过就会红。
+  assert.strictEqual(urls.length, 2, `当天已签成的一轮启动应当只有积分+签到状态两个请求，实发 ${urls.length}：${urls.join(', ')}`);
 });
 
-test('关掉自动签到后不发 claim，但手动命令仍能签', async () => {
+test('关掉自动签到后不发 claim，但手动命令仍能签', async t => {
   const urls = countingFetch();
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: false });
-  const ext = freshRequire();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
+  assert.strictEqual(activeStub.getConfig('autoCheckin'), false, '这一轮确实是用户拨到关');
   assert.strictEqual(claimsOf(urls).length, 0);
+  assert.strictEqual(urls.length, 2, '关闭态的一轮启动就是积分+签到状态两个请求');
   await activeStub.commands.get('traecnquota.checkin')();
   await settle();
   assert.strictEqual(claimsOf(urls).length, 1, '手动签到命令要能绕过日期守卫之外的关闭态');
-  ext.deactivate();
+});
+
+/**
+ * 产品默认是「开」（package.json 的 default: true）。这条不传 autoCheckin，
+ * 走的就是真实用户装好插件那一刻的路径：默认开启 + 默认开启时的请求预算。
+ * 关掉开关的用例只能证明「关着不发」，证明不了「默认会发」——那是整个功能的全部价值。
+ */
+test('不写 autoCheckin 设置时按产品默认开启：一次启动恰好领一次，且总预算为三个请求', async t => {
+  const urls = countingFetch();
+  // 刻意不写 autoCheckin，也不经 makeStubCheckinOff：这就是用户装好插件后 settings.json 里没这一项的真路径
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
+  ext.activate(activeStub.context);
+  await settle();
+  assert.strictEqual(activeStub.getConfig('autoCheckin'), undefined, '确认这一轮确实没给任何 autoCheckin 值');
+  assert.strictEqual(claimsOf(urls).length, 1, '默认态必须真的领一次签到');
+  assert.strictEqual(urls.length, 3, `默认开启的一轮启动应为积分+签到状态+领取三个请求，实发 ${urls.length}：${urls.join(', ')}`);
+  assert.match(activeStub.getGlobalState('traecnquota.lastCheckinSuccessDate'), /^\d{4}-\d{2}-\d{2}$/, '领成功要写下日期守卫');
+});
+
+/**
+ * 「默认开」有两个真相来源：package.json 的 default 与 src/extension.ts 的 DEFAULT_AUTO_CHECKIN。
+ * 任一处漂成 false，上面的端到端用例就会失去锚点；这里把两处钉在一起。
+ */
+test('package.json 的 autoCheckin 默认值与 extension.ts 的 DEFAULT_AUTO_CHECKIN 同源且为 true', () => {
+  countingFetch(); // out/api.js 加载期断言 globalThis.fetch 存在
+  const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'package.json'), 'utf8'));
+  const schema = pkg.contributes.configuration.properties['traecnquota.autoCheckin'];
+  assert.strictEqual(schema.default, true, '面向用户的默认必须是开启，否则「每天自动领一次」落空');
+  assert.strictEqual(schema.type, 'boolean');
+  const ext = freshRequire();
+  assert.strictEqual(ext.DEFAULT_AUTO_CHECKIN, true, '代码侧兜底常量必须与 package.json 同值');
+  assert.strictEqual(ext.DEFAULT_AUTO_CHECKIN, schema.default, '两处默认值不得漂移');
   globalThis.fetch = undefined;
 });
 
-test('claim 失败时弹错误通知，且不写成功日期，下次刷新还能重试', async () => {
+test('claim 失败时弹错误通知，且不写成功日期，下次刷新还能重试', async t => {
   const urls = countingFetch();
   globalThis.fetch = async url => {
     const u = String(url);
@@ -992,28 +1052,79 @@ test('claim 失败时弹错误通知，且不写成功日期，下次刷新还�
     return { status: 200, text: async () => JSON.stringify(u.includes('checkin') ? { enable: true, checked_in: false } : usageBody) };
   };
   activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true });
-  const ext = freshRequire();
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.strictEqual(activeStub.getGlobalState('traecnquota.lastCheckinSuccessDate'), undefined, '失败不能记成成功');
   assert.strictEqual(activeStub.calls.error.filter(m => /签到失败/.test(m)).length >= 1, true, '失败要弹错误通知');
-  ext.deactivate(); // 签失败会留下兜底定时器，不收掉测试进程会一直等下去
-  globalThis.fetch = undefined;
+  // 签失败会留下排到次日凌晨的兜底定时器，由 withCleanup 的 deactivate 收掉，否则测试进程一直等下去
 });
 
-test('签到通知里不出现领取积分数值', async () => {
-  countingFetch();
+/**
+ * 兜底定时器的回调必须自带 .catch：tryClaim 的 try/catch 只盖得住它自己那一段，
+ * 日期守卫读 memento 这类前置抛出点在外面，Node 对 floating rejection 默认直接终止进程。
+ * 观测办法是把 globalState 读取打坏，再用假定时器真的跳出次日凌晨那一格：
+ * 有 catch → 只多一行日志；没 catch → 这颗 rejection 无人认领、用例判红（删掉 catch 做过变异实测）。
+ */
+test('定时补签抛出异常时只留一行日志，不把 unhandledRejection 抛给进程', async t => {
+  const urls = [];
+  globalThis.fetch = async url => {
+    const u = String(url);
+    urls.push(u);
+    if (u.includes('checkin_credits/claim')) {
+      return { status: 500, text: async () => 'boom' };
+    }
+    return { status: 200, text: async () => JSON.stringify(u.includes('checkin') ? { enable: true, checked_in: false } : usageBody) };
+  };
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true });
+    const ext = withCleanup(t, freshRequire());
+    ext.activate(activeStub.context);
+    await settle();
+    assert.strictEqual(claimsOf(urls).length, 1, '先让 claim 真的失败一次，兜底定时器才存在');
+    activeStub.setGlobalStateGetThrows(true);
+    mock.timers.tick(25 * 60 * 60 * 1000);
+    await settle();
+    assert.ok(activeStub.logs.some(l => /定时补签失败：globalState 存储层读不出来/.test(l)), '补签的异常要以日志收尾');
+    assert.strictEqual(claimsOf(urls).length, 1, '守卫都没走过去，不该把 claim 补发出去');
+    assert.strictEqual(activeStub.getGlobalState('traecnquota.lastCheckinSuccessDate'), undefined, '抛出的一轮不能记成签到成功');
+  } finally {
+    mock.timers.reset();
+    globalThis.fetch = undefined;
+  }
+});
+
+/**
+ * 「通知里不得出现领了多少积分」得能被反证：桩里让 claim 真的回一份带数量的响应（8888），
+ * 再钉住成功通知就是那句定稿文案、数量在任何对外面上都不出现。
+ * 先断言这一轮确实领成功了——否则「压根没发通知」也会让这条空过（前一版正是如此）。
+ */
+test('签到通知里不出现领取积分数值', async t => {
+  const urls = countingFetch();
+  globalThis.fetch = async url => {
+    const u = String(url);
+    urls.push(u);
+    const body = u.includes('checkin_credits/claim')
+      ? { code: 0, message: 'success', credits_amount: 8888, data: { credits: 8888 } }
+      : u.includes('checkin')
+        ? { enable: true, checked_in: false }
+        : usageBody;
+    return { status: 200, text: async () => JSON.stringify(body) };
+  };
   activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true });
-  const ext = freshRequire();
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
-  const all = activeStub.calls.info.join('\n');
-  assert.strictEqual(/\d+\s*积分/.test(all), false, '按产品要求不显示领了多少积分');
-  ext.deactivate();
-  globalThis.fetch = undefined;
+  assert.strictEqual(claimsOf(urls).length, 1, '这一轮必须真的领一次，否则下面的断言是空过的');
+  assert.match(activeStub.getGlobalState('traecnquota.lastCheckinSuccessDate'), /^\d{4}-\d{2}-\d{2}$/, '写下日期守卫＝走的是成功分支');
+  const toasts = [...activeStub.calls.info, ...activeStub.calls.error];
+  assert.deepStrictEqual(toasts.filter(m => /签到/.test(m)), ['TraeCN 签到成功'], '成功通知就是定稿那一句，没有别的变体');
+  assert.strictEqual(toasts.some(m => m.includes('8888')), false, '接口回的领取数量不许进 toast');
+  assert.strictEqual(bodySvgOf(activeStub).includes('8888'), false, '领取数量也不许进悬浮窗');
 });
 
-test('接口正文只进输出面板，签到失败的 toast 与 tooltip 里都不留正文', async () => {
+test('接口正文只进输出面板，签到失败的 toast 与 tooltip 里都不留正文', async t => {
   const urls = countingFetch();
   globalThis.fetch = async url => {
     const u = String(url);
@@ -1024,7 +1135,7 @@ test('接口正文只进输出面板，签到失败的 toast 与 tooltip 里都�
     return { status: 200, text: async () => JSON.stringify(u.includes('checkin') ? { enable: true, checked_in: false } : usageBody) };
   };
   activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true });
-  const ext = freshRequire();
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.ok(activeStub.calls.error.some(m => /签到失败/.test(m)), '失败要弹错误通知');
@@ -1032,12 +1143,11 @@ test('接口正文只进输出面板，签到失败的 toast 与 tooltip 里都�
   assert.doesNotMatch(toasts, /evil\.example|重新激活账号/, 'toast 里不能有接口正文');
   assert.doesNotMatch(String(activeStub.statusItems[0].tooltip), /evil\.example/, 'tooltip 同样不能');
   assert.match(String(activeStub.statusItems[0].text), /1,500/, '签到挂了不影响积分照常展示');
-  assert.ok(activeStub.logs.some(l => /接口返回：.*链接已隐去|接口返回/.test(l)), '正文线索留在输出面板');
-  ext.deactivate();
-  globalThis.fetch = undefined;
+  // 只认净化后的形态：裸 URL 必须被换成 [链接已隐去]。「或 接口返回」那个分支几乎永真，留着等于没断言
+  assert.ok(activeStub.logs.some(l => /接口返回：.*链接已隐去/.test(l)), '正文线索要以净化形态留在输出面板');
 });
 
-test('claim 正在飞的时候重复触发不会叠加第二次请求', async () => {
+test('claim 正在飞的时候重复触发不会叠加第二次请求', async t => {
   const urls = countingFetch();
   let release;
   const gate = new Promise(r => { release = r; });
@@ -1050,7 +1160,7 @@ test('claim 正在飞的时候重复触发不会叠加第二次请求', async ()
     return { status: 200, text: async () => JSON.stringify(u.includes('checkin') ? { enable: true, checked_in: false } : usageBody) };
   };
   activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true });
-  const ext = freshRequire();
+  const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.strictEqual(claimsOf(urls).length, 1, '启动刷新已经发起一次 claim');
@@ -1060,6 +1170,34 @@ test('claim 正在飞的时候重复触发不会叠加第二次请求', async ()
   release();
   await settle();
   assert.strictEqual(claimsOf(urls).length, 1, '放锁后也不该补发');
-  ext.deactivate();
-  globalThis.fetch = undefined;
 });
+
+/**
+ * autoCheckin 既不在 REFRESH_KEYS 也不是显示项：拨动它只改变后续刷新的决策。
+ * 用户每拨一次开关就打一次接口是打扰，所以这条路径整轮跳过（见 NO_EFFECT_KEYS）。
+ * 注意别把它加进 REFRESH_KEYS——那正好相反，会变成「拨开关必刷」。
+ */
+test('拨动 autoCheckin 开关不触发取数，也不影响已有展示', async t => {
+  const urls = countingFetch();
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true });
+  const ext = withCleanup(t, freshRequire());
+  ext.activate(activeStub.context);
+  await settle();
+  const before = urls.length;
+  const textBefore = String(activeStub.statusItems[0].text);
+  const rowsBefore = dataRows(bodySvgOf(activeStub));
+
+  activeStub.setConfig('autoCheckin', false);
+  await activeStub.fireConfigurationChange('traecnquota.autoCheckin');
+  await settle();
+  assert.strictEqual(urls.length, before, `拨动开关后一个请求都不该多发，实发 ${urls.length - before}：${urls.slice(before).join(', ')}`);
+  assert.strictEqual(claimsOf(urls).length, 1, '开关变更本身不能再补发一次 claim');
+
+  activeStub.setConfig('autoCheckin', true);
+  await activeStub.fireConfigurationChange('traecnquota.autoCheckin');
+  await settle();
+  assert.strictEqual(urls.length, before, '拨回开启同样不该取数');
+  assert.strictEqual(String(activeStub.statusItems[0].text), textBefore, '拨开关不改状态栏');
+  assert.strictEqual(dataRows(bodySvgOf(activeStub)), rowsBefore, '也不触发行数重绘');
+});
+

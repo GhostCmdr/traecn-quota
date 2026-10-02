@@ -36,10 +36,12 @@ const DEFAULT_DETAIL_ROWS = 3;
 /** 自动刷新间隔（分钟）的默认值与上限，与 package.json 里 default/maximum 保持一致 */
 const DEFAULT_REFRESH_MINUTES = 30;
 const MAX_REFRESH_MINUTES = 1440;
-/** 自动签到的默认开关，与 package.json 里 traecnquota.autoCheckin 的 default 保持一致 */
-const DEFAULT_AUTO_CHECKIN = true;
+/** 自动签到的默认开关，与 package.json 里 traecnquota.autoCheckin 的 default 保持一致（导出供测试锚定两处同源） */
+export const DEFAULT_AUTO_CHECKIN = true;
 /** 改了必须重新取数的设置项；不在此列的（detailRows、autoCheckin）只需按上一次数据重绘或不影响渲染 */
 const REFRESH_KEYS = ['edition', 'hostOverride', 'manualToken', 'refreshInterval'];
+/** 既不参与渲染也不参与取数的设置项：拨动它只改变后续刷新的决策，本身不该触发任何请求 */
+const NO_EFFECT_KEYS = ['autoCheckin'];
 
 /** 手动 token 在加密保管箱里的键名 */
 const TOKEN_SECRET = 'manualToken';
@@ -676,7 +678,8 @@ async function refresh(verbose: boolean, preResolved?: TraeAuth): Promise<void> 
     refreshing = false;
     if (pendingRefresh) {
       pendingRefresh = false;
-      void refresh(false);
+      // 兜的是 catch/finally 那一段的意外抛出——floating rejection 会直接终止进程
+      void refresh(false).catch(err => log(`补刷失败：${messageOf(err)}`));
     }
   }
 }
@@ -762,7 +765,8 @@ function scheduleCheckinRetry(): void {
   const delayMs = Math.max(next.getTime() - now.getTime(), 60_000);
   checkinTimer = setTimeout(() => {
     checkinTimer = undefined;
-    void maybeAutoClaim();
+    // 与同文件另两处 fire-and-forget 的惯例一致：尾巴必须挂 catch——floating rejection 会终止进程
+    void maybeAutoClaim().catch(err => log(`定时补签失败：${messageOf(err)}`));
   }, delayMs);
 }
 
@@ -799,7 +803,8 @@ function scheduleRefresh(): void {
     return;
   }
   refreshTimer = setInterval(() => {
-    void refresh(false);
+    // 回调没人等它的 promise，异常只能就地记下，否则是一颗 floating rejection
+    void refresh(false).catch(err => log(`定时刷新失败：${messageOf(err)}`));
   }, minutes * 60 * 1000);
 }
 
@@ -836,6 +841,11 @@ export function activate(context: vscode.ExtensionContext): void {
       const otherKeyChanged = REFRESH_KEYS.some(
         key => key !== 'manualToken' && event.affectsConfiguration(`traecnquota.${key}`)
       );
+      // 只动了 autoCheckin（既不影响渲染也不影响取数）时整轮跳过：拨一次开关就打一次接口是打扰。
+      // manualToken 的变更必须优先——清理回声判断和 sweep 都依赖它，不能被判成免刷新。
+      const checkinOnly = !tokenChanged && !otherKeyChanged && NO_EFFECT_KEYS.some(
+        key => event.affectsConfiguration(`traecnquota.${key}`)
+      );
       const displayOnly = !tokenChanged && !otherKeyChanged && event.affectsConfiguration('traecnquota.detailRows');
       // 自己清空设置项荡回来的回声不需要做任何事（其它窗口认不出回声，代价只是多刷一次）。
       // 必须再确认设置项已经空了：清理那几次 await 的窗口期内用户可能又填了一份新值，
@@ -845,6 +855,9 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       void (async () => {
+        if (checkinOnly) {
+          return;
+        }
         if (displayOnly) {
           // 纯排版设置：用上一次的数据重绘即可，不必再打接口
           if (lastSummary) {
