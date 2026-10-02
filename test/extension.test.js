@@ -993,6 +993,7 @@ test('当天已签成功时，再刷新只刷积分不再发 claim', async t => 
   // 日期守卫拦下的是「要不要领」，不是「要不要查今天签没签」：status 仍每轮查、积分照常取。
   // 所以这一轮的预算是精确的 2（usage + status），守卫若被改成连状态查询一起跳过就会红。
   assert.strictEqual(urls.length, 2, `当天已签成的一轮启动应当只有积分+签到状态两个请求，实发 ${urls.length}：${urls.join(', ')}`);
+  assert.deepStrictEqual([...activeStub.calls.info, ...activeStub.calls.error], [], '自动路径被守卫挡掉时必须完全静默');
 });
 
 test('关掉自动签到后不发 claim，但手动命令仍能签', async t => {
@@ -1007,6 +1008,27 @@ test('关掉自动签到后不发 claim，但手动命令仍能签', async t => 
   await activeStub.commands.get('traecnquota.checkin')();
   await settle();
   assert.strictEqual(claimsOf(urls).length, 1, '手动签到命令要能绕过日期守卫之外的关闭态');
+});
+
+/**
+ * 产品契约（优先于计划原文）：只要当天已签成功，任何路径都不得再发 claim——
+ * 手动点击退化为「刷新 + 提示已签」。特意用 autoCheckin:false 起手，
+ * 证明守卫分支不受开关约束（若守卫被挪回 maybeAutoClaim，开关关着就轮不到它拦，这条会红）。
+ */
+test('当天已签成功后再点手动命令：不发 claim，积分照常刷新，提示已签到', async t => {
+  const today = new Date().toLocaleDateString('sv');
+  const urls = countingFetch();
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: false }, { globalState: { 'traecnquota.lastCheckinSuccessDate': today } });
+  const ext = withCleanup(t, freshRequire());
+  ext.activate(activeStub.context);
+  await settle();
+  const before = urls.length;
+  await activeStub.commands.get('traecnquota.checkin')();
+  await settle();
+  assert.strictEqual(claimsOf(urls).length, 0, '签成后手动点击不得再发 claim');
+  assert.ok(urls.length > before, '守卫分支要让用户拿到最新余额，积分刷新照常发生');
+  assert.ok(activeStub.calls.info.some(m => /已签到/.test(m)), '要提示今日已签过、无需重签');
+  assert.strictEqual(activeStub.calls.info.some(m => /签到成功/.test(m)), false, '不能再弹「签到成功」');
 });
 
 /**

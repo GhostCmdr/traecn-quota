@@ -706,20 +706,33 @@ async function refreshCheckinState(auth: TraeAuth): Promise<void> {
 
 /**
  * 领一次签到。成功才写日期守卫，失败保持原样让下一次刷新自然重试；成败都弹通知（产品定稿）。
+ * @param manual 手动命令传 true：被日期守卫挡掉时改为提示「今日已签到」并刷新余额；
+ *               自动路径传 false 保持静默，否则每轮刷新都会弹打扰。
  */
-async function tryClaim(): Promise<void> {
+async function tryClaim(manual: boolean): Promise<void> {
   if (claiming) {
     // claim 锁与刷新锁是两把：refresh 的 finally 先跑，此时自动 claim 还在飞，手动命令能进来。
     // 这里合并而不是排队——重复弹窗才是打扰，而服务端本就幂等，第二次没有任何收益。
+    return;
+  }
+  // 日期在发请求前取定：claim 响应若跨过零点才落定，服务端按发出时刻记的是前一天，守卫也必须写同一天。
+  const day = todayString();
+  // 守卫收在发 claim 的唯一函数里而不是 maybeAutoClaim：手动命令同受「签成后不再重发」契约约束，
+  // 后人新增调用点也绕不过去。此分支没发过 claim，调用 refresh 不构成回环。
+  if (!shouldClaim(extContext?.globalState.get<string>(LAST_CHECKIN_DATE_KEY), day)) {
+    if (manual) {
+      vscode.window.showInformationMessage('TraeCN 今日已签到，无需重复领取');
+      await refresh(true);
+    }
     return;
   }
   claiming = true;
   try {
     const auth = await resolveAuth();
     await claimCheckin(auth);
-    await extContext?.globalState.update(LAST_CHECKIN_DATE_KEY, todayString());
+    await extContext?.globalState.update(LAST_CHECKIN_DATE_KEY, day);
     clearCheckinTimer();
-    log(`${todayString()} 签到成功`);
+    log(`${day} 签到成功`);
     vscode.window.showInformationMessage('TraeCN 签到成功');
     // 不在这里再调 refresh()：那会经 maybeAutoClaim 回到 tryClaim 形成回环。
     // 自动路径的积分刷新本来就在同一轮 refresh 里已经取过；手动命令则交给下一次定时刷新反映新余额。
@@ -727,7 +740,7 @@ async function tryClaim(): Promise<void> {
     const message = messageOf(err);
     const remoteDetail = (err as Partial<import('./api').ApiError>).remoteDetail;
     // 接口正文只进输出面板，toast 里只留用户可读的那半句
-    log(`${todayString()} 签到失败：${message}${remoteDetail ? `｜接口返回：${remoteDetail}` : ''}`);
+    log(`${day} 签到失败：${message}${remoteDetail ? `｜接口返回：${remoteDetail}` : ''}`);
     vscode.window.showErrorMessage(`TraeCN 签到失败：${message}`);
     scheduleCheckinRetry();
   } finally {
@@ -735,16 +748,12 @@ async function tryClaim(): Promise<void> {
   }
 }
 
-/** 自动路径的唯一入口：先看开关，再看日期守卫，都不通过才发请求 */
+/** 自动路径的唯一入口：只看开关；日期守卫收在 tryClaim 里，避免两处各读一次 globalState */
 async function maybeAutoClaim(): Promise<void> {
   if (!autoCheckinEnabled()) {
     return;
   }
-  const today = todayString();
-  if (!shouldClaim(extContext?.globalState.get<string>(LAST_CHECKIN_DATE_KEY), today)) {
-    return;
-  }
-  await tryClaim();
+  await tryClaim(false);
 }
 
 function autoCheckinEnabled(): boolean {
@@ -824,7 +833,7 @@ export function activate(context: vscode.ExtensionContext): void {
     output,
     statusBar,
     vscode.commands.registerCommand('traecnquota.refresh', () => refresh(true)),
-    vscode.commands.registerCommand('traecnquota.checkin', () => tryClaim()),
+    vscode.commands.registerCommand('traecnquota.checkin', () => tryClaim(true)),
     vscode.commands.registerCommand('traecnquota.clearManualToken', () => clearManualToken()),
     vscode.window.onDidChangeActiveColorTheme(() => {
       // SVG 配色是写死的，换主题必须重绘，否则浅色主题下会白字白底
