@@ -829,7 +829,7 @@ test('VS Code 宿主：SVG 高度维持旧公式，底部 9px 依赖容器补', 
   globalThis.fetch = undefined;
 });
 
-test('Trae 宿主（appName 含 trae）：SVG 自带完整底距，比 VS Code 路径高恰好 9', async t => {
+test('Trae 宿主（appName 含 trae）：SVG 比 VS Code 路径高 4（扣 5 对扣 9）', async t => {
   globalThis.fetch = async url => ({
     status: 200,
     text: async () => JSON.stringify(String(url).includes('checkin')
@@ -840,8 +840,8 @@ test('Trae 宿主（appName 含 trae）：SVG 自带完整底距，比 VS Code �
   const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
-  assert.strictEqual(rootSvgHeight(bodySvgOf(activeStub)), 201, 'Trae 路径少减的 9 要留在 SVG 里');
-  assert.strictEqual(rootSvgHeight(bodySvgOf(activeStub)) - 192, 9, '与 VS Code 路径的差值必须是 9');
+  assert.strictEqual(rootSvgHeight(bodySvgOf(activeStub)), 196, 'Trae 路径少减的 4 要留在 SVG 里');
+  assert.strictEqual(rootSvgHeight(bodySvgOf(activeStub)) - 192, 4, '与 VS Code 路径的差值必须是 4');
   globalThis.fetch = undefined;
 });
 
@@ -1078,12 +1078,12 @@ test('当天已签成功后再点手动命令：不发 claim，积分照常刷�
   assert.strictEqual(activeStub.calls.info.some(m => /签到成功/.test(m)), false, '不能再弹「签到成功」');
 });
 
-test('footerHostPad：Trae 系宿主 SVG 自补底距（0），VS Code 走宿主 padding（9）', () => {
+test('footerHostPad：Trae 系宿主扣 5（容器自带少量 padding），其余扣 9', () => {
   countingFetch(); // freshRequire 会连带加载 api.js，它要求 fetch 已就位
   const { footerHostPad } = freshRequire();
-  assert.strictEqual(footerHostPad('Trae CN'), 0);
-  assert.strictEqual(footerHostPad('TRAE SOLO CN'), 0);
-  assert.strictEqual(footerHostPad('TraeCode CN'), 0);
+  assert.strictEqual(footerHostPad('Trae CN'), 5);
+  assert.strictEqual(footerHostPad('TRAE SOLO CN'), 5);
+  assert.strictEqual(footerHostPad('TraeCode CN'), 5);
   assert.strictEqual(footerHostPad('Visual Studio Code'), 9);
   assert.strictEqual(footerHostPad('Cursor'), 9);
   assert.strictEqual(footerHostPad(undefined), 9);
