@@ -21,6 +21,7 @@
 - 悬浮积分卡片：进度条、百分比、按到期时间排序的套餐明细、今日签到状态
 - 定时自动刷新
 - 额度数值按量级压缩，卡片宽度恒定
+- 每日自动领取签到积分，可关闭
 
 ## 前提
 
@@ -37,6 +38,7 @@
 |---|---|---|
 | `traecnquota.refreshInterval` | `30` | 自动刷新间隔（分钟），`0` 关闭 |
 | `traecnquota.detailRows` | `3` | 积分包显示条数，可调 `2` ~ `5` |
+| `traecnquota.autoCheckin` | `true` | 每天自动领一次签到积分 |
 | `traecnquota.edition` | `auto` | 读取哪个国内版客户端的登录态 |
 | `traecnquota.manualToken` | 空 | 手动 accessToken，填一次即收进保管箱并清空 |
 | `traecnquota.hostOverride` | 空 | 调试用，只接受默认端口上的 `https://api.trae.cn` |
@@ -46,6 +48,7 @@
 | 命令 | 作用 |
 |---|---|
 | `TraeCN Quota: 刷新积分` | 立即取一次 |
+| `TraeCN Quota: 立即签到` | 手动补领今天的签到 |
 | `TraeCN Quota: 清除保管箱里的手动 Token` | 弃用手动 token，回到用客户端登录态 |
 
 ## 隐私

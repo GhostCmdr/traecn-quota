@@ -21,6 +21,7 @@ You can also install manually from the `.vsix` in [Releases](https://github.com/
 - Hover card: progress bar, percentage, plan breakdown sorted by expiry, today's check-in status
 - Scheduled auto-refresh
 - Credit values are compacted by magnitude so the card width stays constant
+- Claims the daily check-in credit automatically; can be turned off
 
 ## Requirements
 
@@ -37,6 +38,7 @@ If neither is available, the status bar shows "no login session found".
 |---|---|---|
 | `traecnquota.refreshInterval` | `30` | Auto-refresh interval in minutes, `0` disables |
 | `traecnquota.detailRows` | `3` | Number of credit packs shown, range `2`–`5` |
+| `traecnquota.autoCheckin` | `true` | Claim the daily check-in automatically |
 | `traecnquota.edition` | `auto` | Which mainland client's login session to read |
 | `traecnquota.manualToken` | empty | Manual access token; entered once, then moved to the secret store and cleared |
 | `traecnquota.hostOverride` | empty | Debug only; accepts only `https://api.trae.cn` on the default port |
@@ -46,6 +48,7 @@ If neither is available, the status bar shows "no login session found".
 | Command | Effect |
 |---|---|
 | `TraeCN Quota: 刷新积分` | Fetch once immediately |
+| `TraeCN Quota: 立即签到` | Manually claim today's check-in |
 | `TraeCN Quota: 清除保管箱里的手动 Token` | Discard the manual token, fall back to the client session |
 
 ## Privacy
