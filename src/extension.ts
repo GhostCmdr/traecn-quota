@@ -841,12 +841,14 @@ export function activate(context: vscode.ExtensionContext): void {
       const otherKeyChanged = REFRESH_KEYS.some(
         key => key !== 'manualToken' && event.affectsConfiguration(`traecnquota.${key}`)
       );
+      // 同一次 settings.json 保存只派发一个多键事件，所以两个判定必须互斥：
+      // 还动了 detailRows 时「需要重绘」优先，不能被下面这个「什么都不用做」的短路吞掉。
+      const displayOnly = !tokenChanged && !otherKeyChanged && event.affectsConfiguration('traecnquota.detailRows');
       // 只动了 autoCheckin（既不影响渲染也不影响取数）时整轮跳过：拨一次开关就打一次接口是打扰。
       // manualToken 的变更必须优先——清理回声判断和 sweep 都依赖它，不能被判成免刷新。
-      const checkinOnly = !tokenChanged && !otherKeyChanged && NO_EFFECT_KEYS.some(
+      const checkinOnly = !tokenChanged && !otherKeyChanged && !displayOnly && NO_EFFECT_KEYS.some(
         key => event.affectsConfiguration(`traecnquota.${key}`)
       );
-      const displayOnly = !tokenChanged && !otherKeyChanged && event.affectsConfiguration('traecnquota.detailRows');
       // 自己清空设置项荡回来的回声不需要做任何事（其它窗口认不出回声，代价只是多刷一次）。
       // 必须再确认设置项已经空了：清理那几次 await 的窗口期内用户可能又填了一份新值，
       // 只认布尔标记会把新值当回声吞掉——明文留在 settings.json 里，而且要等到下一个配置事件才会被收走。

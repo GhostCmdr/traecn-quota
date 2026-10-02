@@ -54,10 +54,12 @@ function makeVscodeStub(initialConfig = {}, options = {}) {
     }
   }
 
-  const fireConfigChange = changedKey => {
+  const fireConfigChange = changedKeys => {
     if (configChangeHandler) {
-      // 真实语义：affectsConfiguration(section) 当且仅当变更的 key 落在该 section 下
-      return configChangeHandler({ affectsConfiguration: section => changedKey.startsWith(section) });
+      // 真实语义：affectsConfiguration(section) 当且仅当变更的 key 落在该 section 下。
+      // 同一次 settings.json 保存只派发一个多键事件，所以这里要能一次传一组 key。
+      const keys = Array.isArray(changedKeys) ? changedKeys : [changedKeys];
+      return configChangeHandler({ affectsConfiguration: section => keys.some(k => k.startsWith(section)) });
     }
   };
 
@@ -154,8 +156,8 @@ function makeVscodeStub(initialConfig = {}, options = {}) {
       vscode.window.activeColorTheme.kind = kind;
       return themeChangeHandler({ kind });
     },
-    fireConfigurationChange(changedKey) {
-      return fireConfigChange(changedKey);
+    fireConfigurationChange(changedKeys) {
+      return fireConfigChange(changedKeys);
     }
   };
 }
@@ -1199,5 +1201,48 @@ test('拨动 autoCheckin 开关不触发取数，也不影响已有展示', asyn
   assert.strictEqual(urls.length, before, '拨回开启同样不该取数');
   assert.strictEqual(String(activeStub.statusItems[0].text), textBefore, '拨开关不改状态栏');
   assert.strictEqual(dataRows(bodySvgOf(activeStub)), rowsBefore, '也不触发行数重绘');
+});
+
+/**
+ * VSCode 对同一次 settings.json 保存只派发一个多键事件，所以「同时改 detailRows 和 autoCheckin 再保存」
+ * 是用户手边真实会发生的动作。它必须走 displayOnly 的免网络即时重绘：
+ * autoCheckin 那条「什么都不用做」的短路不能把同行的 detailRows 一起吞掉（行数会陈旧一格到下次刷新）。
+ */
+test('同一次保存改 detailRows + autoCheckin：行数立刻重绘且不发请求', async t => {
+  const urls = countingFetch();
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true });
+  const ext = withCleanup(t, freshRequire());
+  ext.activate(activeStub.context);
+  await settle();
+  const before = urls.length;
+  assert.strictEqual(dataRows(bodySvgOf(activeStub)), 3, '起手 3 行，重绘前后才有可比性');
+
+  activeStub.setConfig('detailRows', 2);
+  activeStub.setConfig('autoCheckin', false);
+  await activeStub.fireConfigurationChange(['traecnquota.detailRows', 'traecnquota.autoCheckin']);
+  await settle();
+
+  assert.strictEqual(dataRows(bodySvgOf(activeStub)), 2, 'detailRows 的免网络重绘不能被 checkinOnly 短路吞掉');
+  assert.strictEqual(urls.length, before, `两个键都不需要取数，一个请求都不该发，实发 ${urls.length - before}：${urls.slice(before).join(', ')}`);
+  assert.strictEqual(claimsOf(urls).length, 1, '开关拨到关不借这次事件补发 claim');
+});
+
+/** 多键事件的另一半：同一次保存里若还动了凭证，取数路径不能被免取数短路判掉 */
+test('同一次保存改 manualToken + autoCheckin：凭证优先，照常重新取数', async t => {
+  const urls = countingFetch();
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true });
+  const ext = withCleanup(t, freshRequire());
+  ext.activate(activeStub.context);
+  await settle();
+  const before = urls.length;
+  assert.strictEqual(claimsOf(urls).length, 1, '今天已签成，后面那轮刷新只剩积分两个请求，计数才好读');
+
+  activeStub.setConfig('manualToken', 'another-token');
+  activeStub.setConfig('autoCheckin', false);
+  await activeStub.fireConfigurationChange(['traecnquota.manualToken', 'traecnquota.autoCheckin']);
+  await settle();
+
+  assert.strictEqual(urls.length, before + 2, `凭证变了必须重新取数（+积分+签到状态），实发 ${urls.length - before}：${urls.slice(before).join(', ')}`);
+  assert.strictEqual(activeStub.secrets.get('manualToken'), 'another-token', '新 token 仍要收进保管箱');
 });
 
