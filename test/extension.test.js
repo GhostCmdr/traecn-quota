@@ -1079,6 +1079,7 @@ test('当天已签成功后再点手动命令：不发 claim，积分照常刷�
 });
 
 test('footerHostPad：Trae 系宿主 SVG 自补底距（0），VS Code 走宿主 padding（9）', () => {
+  countingFetch(); // freshRequire 会连带加载 api.js，它要求 fetch 已就位
   const { footerHostPad } = freshRequire();
   assert.strictEqual(footerHostPad('Trae CN'), 0);
   assert.strictEqual(footerHostPad('TRAE SOLO CN'), 0);
@@ -1086,6 +1087,7 @@ test('footerHostPad：Trae 系宿主 SVG 自补底距（0），VS Code 走宿主
   assert.strictEqual(footerHostPad('Visual Studio Code'), 9);
   assert.strictEqual(footerHostPad('Cursor'), 9);
   assert.strictEqual(footerHostPad(undefined), 9);
+  globalThis.fetch = undefined;
 });
 
 /**
