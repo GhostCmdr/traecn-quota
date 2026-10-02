@@ -5,6 +5,13 @@ import { decryptTcValue } from './crypto';
 
 type Edition = 'cn' | 'solo-cn';
 
+/** 与指纹同源的 Trae 客户端版本；缺失时请求头回落到内置兜底值 */
+export interface DeviceFingerprint {
+  machineId?: string | undefined;
+  deviceId?: string | undefined;
+  ideVersion?: string | undefined;
+}
+
 export interface TraeAuth {
   token: string;
   userId: string;
@@ -12,10 +19,18 @@ export interface TraeAuth {
   host: string;
   /** 形状不认识时是 undefined，与「字段缺失」同义，显式允许 */
   expiredAt?: string | undefined;
+  /** claim 接口做设备指纹校验，带上客户端真实值才不会被拒 */
+  machineId?: string | undefined;
+  deviceId?: string | undefined;
+  ideVersion?: string | undefined;
   edition: Edition | 'manual';
 }
 
 const AUTH_KEY = 'iCubeAuthInfo://icube.cloudide';
+const MACHINE_ID_KEY = 'telemetry.machineId';
+const IDE_VERSION_KEY = 'iCubeLastVersion';
+// 设备 ID 藏在键名里：iCubeAuthInfo://icube-dc:<N>，N 就是服务端认的那个数字串
+const DEVICE_ID_KEY_RE = /^iCubeAuthInfo:\/\/icube-dc:(\d+)$/;
 export const DEFAULT_HOST = 'https://api.trae.cn';
 // 精确主机名，不用 *.trae.cn 通配：任意子域（含悬垂 CNAME 的废弃环境）都能收走请求头里的凭证。
 // 本机 Trae CN / TRAE SOLO CN 登录态写入的 host 实测都是 https://api.trae.cn，收紧不会误拒。
@@ -72,19 +87,88 @@ export function editionLabel(edition: Edition): string {
   return EDITION_LABELS[edition];
 }
 
+/**
+ * 从已解析的 storage.json 里提取设备指纹。指纹是设备级信息，与账号是否登录无关，
+ * 三个字段哪个缺就缺着返回，绝不编造——编出来的指纹过不了 claim 的服务端校验。
+ */
+function extractFingerprint(storage: Record<string, unknown>): DeviceFingerprint {
+  const fingerprint: DeviceFingerprint = {};
+  const machineId = storage[MACHINE_ID_KEY];
+  if (typeof machineId === 'string' && machineId.trim()) {
+    fingerprint.machineId = machineId.trim();
+  }
+  const ideVersion = storage[IDE_VERSION_KEY];
+  if (typeof ideVersion === 'string' && ideVersion.trim()) {
+    fingerprint.ideVersion = ideVersion.trim();
+  }
+  for (const key of Object.keys(storage)) {
+    const matched = DEVICE_ID_KEY_RE.exec(key);
+    if (matched) {
+      fingerprint.deviceId = matched[1];
+      break;
+    }
+  }
+  return fingerprint;
+}
+
+function parseStorageJson(storagePath: string, label: string): Record<string, unknown> {
+  let storage: unknown;
+  try {
+    storage = JSON.parse(fs.readFileSync(storagePath, 'utf8'));
+  } catch {
+    // 不把 storagePath 拼进消息：那里面含本机用户名，用户截图求助时会一起漏出去
+    throw new Error(`${label} 的登录态文件读不出来或不是合法 JSON`);
+  }
+  if (!storage || typeof storage !== 'object' || Array.isArray(storage)) {
+    throw new Error(`${label} 的登录态文件读不出来或不是合法 JSON`);
+  }
+  return storage as Record<string, unknown>;
+}
+
+function readFingerprintFromDir(edition: Edition): DeviceFingerprint {
+  const storagePath = path.join(roamingDir(), EDITION_DIRS[edition], 'User', 'globalStorage', 'storage.json');
+  if (!fs.existsSync(storagePath)) {
+    throw new Error(`未找到 ${EDITION_LABELS[edition]} 的登录态文件`);
+  }
+  return extractFingerprint(parseStorageJson(storagePath, EDITION_LABELS[edition]));
+}
+
+/**
+ * 读取 Trae 客户端写入的设备指纹。edition 为 auto 时按 cn -> solo-cn 找第一个含指纹的文件；
+ * 一个都找不到时抛错（与 loadAuth 同风格）。loadAuth 成功的路径总是能顺带带出指纹，
+ * 这个独立入口主要给手动 token 用户与测试用。
+ */
+export function loadDeviceFingerprint(edition: string): DeviceFingerprint {
+  if (edition && edition !== 'auto') {
+    if (!(edition in EDITION_DIRS)) {
+      // 与 loadAuth 同源的错误文案；settings.json 手可改，原值不回显（会进按 Markdown 渲染的界面）
+      throw new Error('traecnquota.edition 的值不是可识别的客户端，只能是 auto / cn / solo-cn');
+    }
+    return readFingerprintFromDir(edition as Edition);
+  }
+
+  const errors: string[] = [];
+  for (const candidate of Object.keys(EDITION_DIRS) as Edition[]) {
+    try {
+      const fingerprint = readFingerprintFromDir(candidate);
+      if (fingerprint.machineId !== undefined || fingerprint.deviceId !== undefined || fingerprint.ideVersion !== undefined) {
+        return fingerprint;
+      }
+      errors.push(`${EDITION_LABELS[candidate]}: 登录态文件里没有设备指纹字段`);
+    } catch (err) {
+      errors.push(`${EDITION_LABELS[candidate]}: ${(err as Error).message}`);
+    }
+  }
+  throw new Error(`未能从任何 Trae 客户端读取设备指纹。${errors.join('；')}`);
+}
+
 function readFromDir(edition: Edition): TraeAuth {
   const storagePath = path.join(roamingDir(), EDITION_DIRS[edition], 'User', 'globalStorage', 'storage.json');
   if (!fs.existsSync(storagePath)) {
     throw new Error(`未找到 ${EDITION_LABELS[edition]} 的登录态文件`);
   }
 
-  let storage: Record<string, unknown>;
-  try {
-    storage = JSON.parse(fs.readFileSync(storagePath, 'utf8'));
-  } catch {
-    // 不把 storagePath 拼进消息：那里面含本机用户名，用户截图求助时会一起漏出去
-    throw new Error(`${EDITION_LABELS[edition]} 的登录态文件读不出来或不是合法 JSON`);
-  }
+  const storage = parseStorageJson(storagePath, EDITION_LABELS[edition]);
   const raw = storage[AUTH_KEY];
   if (raw === undefined || raw === null || raw === '') {
     throw new Error(`${EDITION_LABELS[edition]} 未登录，请先在该客户端中登录`);
@@ -119,6 +203,8 @@ function readFromDir(edition: Edition): TraeAuth {
     userId,
     host: normalizeApiHost(typeof data.host === 'string' ? data.host : undefined).host,
     expiredAt,
+    // 指纹与登录态同文件，读到的就是这份登录态所属客户端写入的设备标识
+    ...extractFingerprint(storage),
     edition
   };
 }
@@ -163,8 +249,22 @@ export function loadAuthFromToken(token: string): TraeAuth {
     token,
     userId: '',
     host: DEFAULT_HOST,
-    edition: 'manual'
+    edition: 'manual',
+    ...tryReadFingerprint()
   };
+}
+
+/**
+ * 手动 token 用户机器上可能仍装着 Trae 客户端，指纹是设备级信息与登录方式无关，
+ * 所以手动路径也读一次；读不到就全 undefined，请求头回落到生成值。
+ * 刻意吞掉一切错误：指纹缺失只影响 claim 成功率，不该让「手动填 token」这条路失败。
+ */
+function tryReadFingerprint(): DeviceFingerprint {
+  try {
+    return loadDeviceFingerprint('auto');
+  } catch {
+    return {};
+  }
 }
 
 /**

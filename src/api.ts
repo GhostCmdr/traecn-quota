@@ -63,16 +63,21 @@ export interface CreditsSummary {
 }
 
 function buildHeaders(auth: TraeAuth): Record<string, string> {
+  // claim 接口做设备指纹校验：客户端真实值存在就必须用，生成值会被服务端以 code=9074 拒掉；
+  // 没装客户端时才回落到生成值/硬编码值，保住「无 Trae 客户端也能用」的兜底。
+  const ideVersion = auth.ideVersion ?? IDE_VERSION;
+  // 官方对 version-code 的推导规则未公开，去点是同类插件验证过的近似
+  const ideVersionCode = auth.ideVersion ? auth.ideVersion.replace(/\./g, '') : IDE_VERSION_CODE;
   return {
     Authorization: `Cloud-IDE-JWT ${auth.token}`,
     'X-Cloudide-Token': auth.token,
     'x-uid': auth.userId || '',
     'x-app-id': APP_ID,
-    'x-device-id': DEVICE_ID,
-    'x-machine-id': MACHINE_ID,
+    'x-device-id': auth.deviceId ?? DEVICE_ID,
+    'x-machine-id': auth.machineId ?? MACHINE_ID,
     'x-request-id': crypto.randomUUID(),
-    'x-ide-version': IDE_VERSION,
-    'x-ide-version-code': IDE_VERSION_CODE,
+    'x-ide-version': ideVersion,
+    'x-ide-version-code': ideVersionCode,
     'x-device-type': process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'mac' : 'linux',
     'x-os-version': `${process.platform} ${process.arch}`,
     'Content-Type': 'application/json'
