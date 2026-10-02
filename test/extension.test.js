@@ -63,10 +63,14 @@ function makeVscodeStub(initialConfig = {}, options = {}) {
     }
   };
 
+  /** 宿主识别（buildTooltipBody 的页脚底距）按 appName 分流；options.appName 可在单个用例里换成 Trae */
+  const appName = options.appName || 'Visual Studio Code';
+
   const vscode = {
     ColorThemeKind: { Light: 1, Dark: 2, HighContrast: 3, HighContrastLight: 4 },
     StatusBarAlignment: { Left: 1, Right: 2 },
     ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
+    env: { appName },
     MarkdownString: class MarkdownString {
       constructor(v) { this.value = v || ''; }
       appendMarkdown(v) { this.value += v; }
@@ -795,6 +799,49 @@ test('不限量与有限额包并存：整体仍按有限额算占比，只有�
   assert.strictEqual(activeStub.statusItems[0].text, '$(trae-sparkle) 800 (80%)');
   const svg = bodySvgOf(activeStub);
   assert.ok(svg.includes('∞') && svg.includes('不限量'), '明细里那行要标成不限量');
+  globalThis.fetch = undefined;
+});
+
+/** 根 <svg> 标签的 height —— 正则必须锚定 svg 开标签，内部 rect/line 也有自己的 height 属性 */
+const rootSvgHeight = svg => {
+  const m = /<svg [^>]*\bheight="(\d+)"/.exec(svg);
+  assert.ok(m, '根 <svg> 标签没找到 height：' + svg.slice(0, 200));
+  return Number(m[1]);
+};
+
+/**
+ * 双宿主真机实测（2026-10-02）：VS Code 的 Markdown tooltip 容器给行内图下方补 ~9.5px，
+ * Trae 系不补。所以 VS Code 路径维持旧公式（-9），Trae 路径不减——差值必须恰好是 9。
+ * detailRows=3 时旧公式算得 footBase=189，H = 189+1+11-9 = 192。
+ */
+test('VS Code 宿主：SVG 高度维持旧公式，底部 9px 依赖容器补', async t => {
+  globalThis.fetch = async url => ({
+    status: 200,
+    text: async () => JSON.stringify(String(url).includes('checkin')
+      ? { enable: true, checked_in: false }
+      : usageBody)
+  });
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
+  ext.activate(activeStub.context);
+  await settle();
+  assert.strictEqual(rootSvgHeight(bodySvgOf(activeStub)), 192, 'VS Code 路径不能改变旧高度');
+  globalThis.fetch = undefined;
+});
+
+test('Trae 宿主（appName 含 trae）：SVG 自带完整底距，比 VS Code 路径高恰好 9', async t => {
+  globalThis.fetch = async url => ({
+    status: 200,
+    text: async () => JSON.stringify(String(url).includes('checkin')
+      ? { enable: true, checked_in: false }
+      : usageBody)
+  });
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 }, { appName: 'Trae CN' });
+  const ext = withCleanup(t, freshRequire());
+  ext.activate(activeStub.context);
+  await settle();
+  assert.strictEqual(rootSvgHeight(bodySvgOf(activeStub)), 201, 'Trae 路径少减的 9 要留在 SVG 里');
+  assert.strictEqual(rootSvgHeight(bodySvgOf(activeStub)) - 192, 9, '与 VS Code 路径的差值必须是 9');
   globalThis.fetch = undefined;
 });
 

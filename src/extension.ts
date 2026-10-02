@@ -506,8 +506,12 @@ export function buildTooltipBody(
   const rowPitch = TXT_DESC + STEP + STEP + TXT_ASC;
   const lastRowBot = rowBase + Math.max(shown.length - 1, 0) * rowPitch + TXT_DESC;
   const footBase = lastRowBot + STEP * 2 + TXT_ASC;
-  // 页脚墨迹底 → 浮窗下边缘要留 10，Markdown 层（行内图下钻 4.5 + padding 4 + 边框 1）已占 9.5
-  const H = footBase + TXT_DESC + STEP - 9;
+  // TraeCN 的 tooltip 容器不像 VS Code 那样给行内图下方补 padding（双宿主真机实测 2026-10-02，
+  // VS Code B≈12 / TraeCN B≈4-5），所以 Trae 系宿主要把这 9px 留在 SVG 内部，否则页脚贴底。
+  // 识别用 appName 含 "trae"；若 Trae 改名会静默退回紧凑间距，不会报错。
+  // env 用可选链：preview 主题检查脚本给的是极简 vscode 桩（没有 env）， undefined 会测 "undefined" 回落 VS Code 路径
+  const hostPad = /trae/i.test(vscode.env?.appName) ? 0 : 9;
+  const H = footBase + TXT_DESC + STEP - hostPad;
 
   const pct = pctOf(summary);
   const low = !summary.unlimited && pct <= 20;
