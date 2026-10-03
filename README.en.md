@@ -8,10 +8,7 @@ Show your Trae CN credit balance and plan details live in the status bar.
 
 ## Installation
 
-Search for **TraeCN Quota** in your editor's Extensions panel:
-
-- VS Code / Trae: [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=GhostCmdr.traecn-quota)
-- VSCodium / Cursor, etc.: [Open VSX](https://open-vsx.org/extension/GhostCmdr/traecn-quota)
+Search for **TraeCN Quota** in your editor's marketplace.
 
 You can also install manually from the `.vsix` in [Releases](https://github.com/GhostCmdr/traecn-quota/releases/latest).
 
@@ -20,15 +17,14 @@ You can also install manually from the `.vsix` in [Releases](https://github.com/
 - Status bar shows remaining credits and percentage; click to refresh now
 - Hover card: progress bar, percentage, plan breakdown sorted by expiry, today's check-in status
 - Scheduled auto-refresh
-- Credit values are compacted by magnitude so the card width stays constant
-- Claims the daily check-in credit automatically, once a day; can be turned off
+- Daily check-in runs automatically; click the status bar item or run the "TraeCN Quota: 立即签到" command to claim it manually
 
 ## Requirements
 
 Only Trae CN (mainland China) accounts are supported. Provide credentials one of two ways:
 
 1. A signed-in Trae CN / TRAE SOLO CN desktop client — read automatically
-2. Setting `traecnquota.manualToken`: sign in at [trae.cn](https://www.trae.cn) → F12 → Local Storage → copy the value of `Cloud-IDE-Token`
+2. Setting `traecnquota.manualToken` (takes priority over the client login state): sign in at [trae.cn](https://www.trae.cn) → F12 → Local Storage → copy the value of `Cloud-IDE-Token`
 
 If neither is available, the status bar shows "no login session found".
 
@@ -54,7 +50,7 @@ If neither is available, the status bar shows "no login session found".
 ## Privacy
 
 - Credentials are read only from your machine and sent only to `api.trae.cn`; nothing is logged
-- The manual token is stored in the VSCode encrypted secret store (on Windows, encrypted per current user); no plaintext remains in `settings.json`, and it is not synced by Settings Sync
+- The manual token is stored in the editor's own encrypted secret store (on Windows, encrypted per current user); no plaintext remains in `settings.json`, and it is not synced by Settings Sync
 - Failure messages include a short (truncated) snippet of the API response — remove those lines before sharing a screenshot
 
 ## License

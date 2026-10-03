@@ -8,10 +8,7 @@
 
 ## 安装
 
-在你所用编辑器的扩展面板搜索 **TraeCN Quota**：
-
-- VS Code / Trae：[Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=GhostCmdr.traecn-quota)
-- VSCodium / Cursor 等：[Open VSX](https://open-vsx.org/extension/GhostCmdr/traecn-quota)
+在当前所用编辑器的扩展市场搜索 **TraeCN Quota**。
 
 也可从 [Releases](https://github.com/GhostCmdr/traecn-quota/releases/latest) 取 `.vsix` 自行安装。
 
@@ -20,15 +17,14 @@
 - 状态栏显示剩余积分与占比，点击立即刷新
 - 悬浮积分卡片：进度条、百分比、按到期时间排序的套餐明细、今日签到状态
 - 定时自动刷新
-- 额度数值按量级压缩，卡片宽度恒定
-- 每天自动领取一次签到积分，可关闭
+- 每天自动签到，也可点状态栏图标或执行「立即签到」命令补签
 
 ## 前提
 
 仅支持 Trae CN 国内版账号。凭证二选一：
 
 1. 已登录的 Trae CN / TRAE SOLO CN 桌面客户端，自动读取
-2. 设置项 `traecnquota.manualToken`：登录 [trae.cn](https://www.trae.cn) → F12 → 本地存储 → 复制 `Cloud-IDE-Token` 的值
+2. 设置项 `traecnquota.manualToken`（以手动输入为第一优先）：登录 [trae.cn](https://www.trae.cn) → F12 → 本地存储 → 复制 `Cloud-IDE-Token` 的值
 
 两者都拿不到时状态栏提示「未找到登录态」。
 
@@ -54,7 +50,7 @@
 ## 隐私
 
 - 凭证只从本机读取，只发往 `api.trae.cn`，不写日志
-- 手动 token 存进 VSCode 加密保管箱（Windows 上按当前登录用户加密），`settings.json` 里不留明文，也不会被 Settings Sync 同步走
+- 手动 token 存进编辑器自身的加密保管箱（Windows 上按当前登录用户加密），`settings.json` 里不留明文，也不会被 Settings Sync 同步走
 - 失败原因里会带一小段接口返回内容（已截断），截图外发前请先删掉那几行
 
 ## License
