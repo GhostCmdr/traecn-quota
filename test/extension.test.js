@@ -1328,3 +1328,52 @@ test('同一次保存改 manualToken + autoCheckin：凭证优先，照常重新
   assert.strictEqual(activeStub.secrets.get('manualToken'), 'another-token', '新 token 仍要收进保管箱');
 });
 
+
+/**
+ * 用量明细跳转图标：Trae 系顶栏本就有「点击查看积分用量明细」按钮，
+ * 它走 workbench.action.icubeOpenUsageDetails；其他宿主没这条命令，回落到网页。
+ */
+test('usageTargetHref：Trae 系走内部命令，其余宿主走网页地址', () => {
+  countingFetch();
+  const { usageTargetHref } = freshRequire();
+  assert.strictEqual(usageTargetHref('Trae CN'), 'command:workbench.action.icubeOpenUsageDetails');
+  assert.strictEqual(usageTargetHref('TRAE SOLO CN'), 'command:workbench.action.icubeOpenUsageDetails');
+  assert.strictEqual(usageTargetHref('Visual Studio Code'), 'https://www.trae.cn/dashboard#usage');
+  assert.strictEqual(usageTargetHref(undefined), 'https://www.trae.cn/dashboard#usage');
+  globalThis.fetch = undefined;
+});
+
+test('usageIconUri：用量图标是第三张独立图标，不与刷新/齿轮同图', () => {
+  countingFetch();
+  const { usageIconUri, refreshIconUri, gearIconUri } = freshRequire();
+  const u = usageIconUri('#888888');
+  assert.match(u, /^data:image\/svg\+xml;base64,/, '要是可用的 SVG data URI');
+  assert.notStrictEqual(u, refreshIconUri('#888888'));
+  assert.notStrictEqual(u, gearIconUri('#888888'));
+  globalThis.fetch = undefined;
+});
+
+test('标题行有第三个图标，VS Code 宿主的用量链接指向网页', async t => {
+  countingFetch();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
+  ext.activate(activeStub.context);
+  await settle();
+  const md = String(activeStub.statusItems[0].tooltip.value);
+  const anchors = md.match(/<a href="[^"]+"/g) || [];
+  assert.strictEqual(anchors.length, 3, '标题行应有设置/刷新/用量三个可点图标');
+  assert.ok(anchors.some(a => a.includes('https://www.trae.cn/dashboard#usage')), '非 Trae 宿主要点向网页');
+  globalThis.fetch = undefined;
+});
+
+test('标题行用量图标在 Trae 宿主指向内部命令', async t => {
+  countingFetch();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 }, { appName: 'Trae CN' });
+  const ext = withCleanup(t, freshRequire());
+  ext.activate(activeStub.context);
+  await settle();
+  const md = String(activeStub.statusItems[0].tooltip.value);
+  assert.ok(md.includes('command:workbench.action.icubeOpenUsageDetails'), 'Trae 宿主要点向用量管理页');
+  assert.ok(!md.includes('www.trae.cn/dashboard'), 'Trae 宿主不该退回网页');
+  globalThis.fetch = undefined;
+});

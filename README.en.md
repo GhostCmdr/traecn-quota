@@ -18,6 +18,7 @@ You can also install manually from the `.vsix` in [Releases](https://github.com/
 - Hover card: progress bar, percentage, plan breakdown sorted by expiry, today's check-in status
 - Scheduled auto-refresh
 - Daily check-in runs automatically; click the status bar item to claim it manually
+- Card header icon opens the usage details page
 
 ## Requirements
 

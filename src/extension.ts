@@ -446,6 +446,26 @@ function cachedIcon(key: string, build: () => string): string {
   return uri;
 }
 
+/** 标题栏右侧可点击图标：用量明细（四条长短横线，形如明细列表） */
+export function usageIconUri(color: string): string {
+  return cachedIcon('u' + color, () =>
+    svgDataUri(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><g fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round"><path d="M2.6 3.6h10.8"/><path d="M2.6 6.9h6.6"/><path d="M2.6 10.2h10.8"/><path d="M2.6 13.5h8"/></g></svg>`
+    )
+  );
+}
+
+/**
+ * 用量明细的跳转目标。Trae 系顶栏那个「点击查看积分用量明细」按钮走
+ * workbench.action.icubeOpenUsageDetails（命令 id 从本机 Trae 的 workbench 包里核出），
+ * 其他宿主没这条命令，点了会报错，所以回落到网页端用量页。
+ */
+export function usageTargetHref(appName: string | undefined): string {
+  return /trae/i.test(appName ?? '')
+    ? 'command:workbench.action.icubeOpenUsageDetails'
+    : 'https://www.trae.cn/dashboard#usage';
+}
+
 /** 标题栏右侧可点击图标：刷新（双向弧 sync） */
 export function refreshIconUri(color: string): string {
   return cachedIcon('r' + color, () =>
@@ -612,17 +632,19 @@ function render(summary: CreditsSummary): void {
   const iconColor = pal.muted;
 
   const md = new vscode.MarkdownString();
-  // isTrusted 服务于标题行两个硬编码的 command: 链接；supportHtml 必须为 true，
-  // 否则 `<a><img align="right" hspace>` 的刷新/齿轮图标不渲染，右浮动间距纯 Markdown 做不到。
-  // 这两项合起来等于「markdown 层里不得出现远程字段」：远程数据只进 base64 的 <img> 内容，
-  // 且进 SVG 前已在 api.ts / escHtml 里净化与转义。
+  // isTrusted 服务于标题行三个硬编码链接（两条 command: + 用量在 Trae 系也是 command:）；
+  // supportHtml 必须为 true，否则 `<a><img align="right" hspace>` 的图标不渲染，右浮动间距纯 Markdown 做不到。
+  // 这两项合起来等于「markdown 层里不得出现远程字段」：链接目标全是本文件里的常量，
+  // 远程数据只进 base64 的 <img> 内容，且进 SVG 前已在 api.ts / escHtml 里净化与转义。
   md.isTrusted = true;
   md.supportHtml = true;
-  // 标题行：左标题 + 右浮动可点击图标（齿轮=打开设置，刷新=刷新积分）
+  // 标题行：左标题 + 右浮动可点击图标。float:right 按 DOM 顺序从右往左排，
+  // 所以视觉上是 用量 · 刷新 · 设置；相邻图标间距 = 两者 hspace 之和，用量取 6 与前两者等距
   md.appendMarkdown(
     `### TraeCN 积分余额 ` +
       `<a href="command:workbench.action.openSettings?%5B%22traecnquota%22%5D"><img src="${gearIconUri(iconColor)}" align="right" width="14" hspace="6" alt="设置"></a>` +
-      `<a href="command:traecnquota.refresh"><img src="${refreshIconUri(iconColor)}" align="right" width="14" hspace="18" alt="刷新"></a>\n\n`
+      `<a href="command:traecnquota.refresh"><img src="${refreshIconUri(iconColor)}" align="right" width="14" hspace="18" alt="刷新"></a>` +
+      `<a href="${usageTargetHref(vscode.env?.appName)}"><img src="${usageIconUri(iconColor)}" align="right" width="14" hspace="6" alt="用量明细"></a>\n\n`
   );
   md.appendMarkdown(
     `![积分数据](${svgDataUri(buildTooltipBody(packs, summary, pal, detailRows(), lastFetchedAt))})`
