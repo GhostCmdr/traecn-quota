@@ -17,7 +17,7 @@ You can also install manually from the `.vsix` in [Releases](https://github.com/
 - Status bar shows remaining credits and percentage; click to refresh now
 - Hover card: progress bar, percentage, plan breakdown sorted by expiry, today's check-in status
 - Scheduled auto-refresh
-- Daily check-in runs automatically; click the status bar item or run the "TraeCN Quota: 立即签到" command to claim it manually
+- Daily check-in runs automatically; click the status bar item to claim it manually
 
 ## Requirements
 
