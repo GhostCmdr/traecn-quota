@@ -115,7 +115,7 @@
           "type": "string",
           "default": "",
           "format": "password",
-          "markdownDescription": "手动指定 accessToken。输入后，以手动输入为第一优先。自动存进加密保管箱并清空 `settings.json`。如需弃用，请执行命令 **TraeCN Quota: 清除保管箱里的手动 Token**。留空则自动从 Trae 客户端的本地登录态解密获取。"
+          "markdownDescription": "手动指定 accessToken。（最高优先，重复填写自动覆盖旧值）自动存进加密保管箱并清空 `settings.json`。如需弃用，请执行命令 **TraeCN Quota: 清除保管箱里的手动 Token**。留空则自动从 Trae 客户端的本地登录态解密获取。"
         }
       }
     }
