@@ -975,6 +975,25 @@ test('额度显示按量级压缩：1 万以内千分位，1 万~1 亿用 w，1 
   }
 });
 
+/**
+ * 档位边界靠 Math.round 决定：9999.6 先入 10000 才换单位，所以显示 1w 而不是 9,999。
+ * 「去掉 .0」在两档都要成立，否则 19999 会显示成 2.0w、1e8 会显示成 1.0亿。
+ */
+test('fmtCredits：先四舍五入再换档，尾数 .0 去掉，非有限值降级为 -', () => {
+  countingFetch();
+  activeStub = makeStubCheckinOff({ detailRows: 3, refreshInterval: 0 });
+  const ext = freshRequire();
+  const table = [
+    [9999.4, '9,999'], [9999.6, '1w'], [10499, '1w'], [19999, '2w'],
+    [99999999, '10,000w'], [100000000, '1亿'], [1000000000, '10亿'], [1234567890, '12.3亿'],
+    [0.4, '0'], [NaN, '-'], [Infinity, '-'], [-Infinity, '-']
+  ];
+  for (const [v, want] of table) {
+    assert.strictEqual(ext.fmtCredits(v), want, String(v));
+  }
+  globalThis.fetch = undefined;
+});
+
 test('名称列格数按额度串实测宽度让位；1 万以内的数据与定稿布局一像素不差', () => {
   countingFetch();
   activeStub = makeStubCheckinOff({ detailRows: 3, refreshInterval: 0 });
