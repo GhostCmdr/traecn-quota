@@ -472,14 +472,17 @@ export function gearIconUri(color: string): string {
  */
 /**
  * 页脚底距的宿主补偿：从 STEP 里扣掉多少，剩多少留在 SVG 内。
- * 两家 tooltip 容器给行内图下方补的 padding 不同（双宿主真机逐像素实测 2026-10-02，
- * 用户标红线取样）：VS Code 折算 ≈6 单位、Trae 系 ≈1.9 单位。
- * 目标是「分隔线→文本上缘」A ≈ 「文本下缘→卡片底边」B：VS Code 扣 9 后 B/A≈0.88，
- * Trae 扣 5 后 B/A≈0.94，与 VS Code 观感一致；扣 0 会让 B≈1.5×A（第一版补偿过头）。
+ * 行内图下方宿主额外补的空间两家不同，2026-10-03 用 preview/measure-host-gap.js
+ * 对两家真机截图逐行反推（缩放由 SVG 内部刻度自校准；截图边缘 ±1px 折 ±0.85 单位）：
+ * VS Code 补 7.9 单位 ⇒ 契约值 8.6，Trae 系补 3.4 单位 ⇒ 契约值 4.1。
+ * 推导：页脚墨迹底到 SVG 底自带 10.7，B = 10.7 - hostPad + 宿主补，设计契约 B = A = 10。
+ * VS Code 取整为 9（实测 B/A=0.92，也是 preview/measure-pixels.js 布局回归锁住的那套），
+ * Trae 取整为 4（扣 5 会让 B/A 掉到 0.87）。
+ * 识别用 appName 含 "trae"；若 Trae 改名会静默退回 VS Code 取值，不会报错。
  * 调用方用可选链传 appName：preview 主题检查脚本的极简 vscode 桩没有 env。
  */
 export function footerHostPad(appName: string | undefined): number {
-  return /trae/i.test(appName ?? '') ? 5 : 9;
+  return /trae/i.test(appName ?? '') ? 4 : 9;
 }
 
 export function buildTooltipBody(
@@ -518,7 +521,7 @@ export function buildTooltipBody(
   const rowPitch = TXT_DESC + STEP + STEP + TXT_ASC;
   const lastRowBot = rowBase + Math.max(shown.length - 1, 0) * rowPitch + TXT_DESC;
   const footBase = lastRowBot + STEP * 2 + TXT_ASC;
-  // Trae 系容器补的 padding 少（见 footerHostPad 注释），扣得也少；具体取值来自用户标红线的双宿主实测
+  // 宿主在行内图下方补得少就扣得少，取值见 footerHostPad 注释里的双宿主实测
   const hostPad = footerHostPad(vscode.env?.appName);
   const H = footBase + TXT_DESC + STEP - hostPad;
 
