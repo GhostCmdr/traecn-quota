@@ -429,7 +429,7 @@ test('detailRows 被手改成非法值时回落到默认 3 行，而不是空表
   globalThis.fetch = async url => (String(url).includes('checkin')
     ? { status: 200, text: async () => JSON.stringify({ enable: true, checked_in: false }) }
     : { status: 200, text: async () => JSON.stringify(usageBody) });
-  for (const [bad, want] of [['abc', 3], [{}, 3], [null, 3], [0, 2], [-5, 2], [99, 3], ['2', 2]]) {
+  for (const [bad, want] of [['abc', 3], [{}, 3], [null, 3], [0, 1], [-5, 1], [99, 3], ['2', 2]]) {
     activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: bad, refreshInterval: 0 });
     withCleanup(t, freshRequire()).activate(activeStub.context);
     await settle();
@@ -1663,5 +1663,40 @@ test('到期时间与底部的更新时间都只显示到分钟', async t => {
   assert.match(expire, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/, '到期时间不该带秒，实际是 ' + expire);
   const stamp = (svg.match(/更新 ([^<]+)</) || [])[1];
   assert.match(stamp, /^\d{1,2}:\d{2}$/, '更新时间不该带秒，实际是 ' + stamp);
+  globalThis.fetch = undefined;
+});
+
+/** 明细行数可调范围放宽到 1~6：下限 1 行、上限 6 行，越界手改值要夹到边界上 */
+test('detailRows 夹在 1~6：手改成 0 或 9 都落在边界', async t => {
+  const packs = Array.from({ length: 6 }, (_, i) => ({
+    display_desc: '包' + i,
+    entitlement_base_info: { quota: { credits_limit: 1000 * (i + 1) } },
+    usage: { credits_amount: 0 },
+    expire_time: 1792579103 + (i + 1) * 86400
+  }));
+  globalThis.fetch = async url => ({
+    status: 200,
+    text: async () =>
+      JSON.stringify(
+        String(url).includes('checkin')
+          ? { enable: true, checked_in: false }
+          : { user_entitlement_pack_list: packs }
+      )
+  });
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 0, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
+  ext.activate(activeStub.context);
+  await settle();
+  assert.strictEqual(dataRows(bodySvgOf(activeStub)), 1, '0 要夹到下限 1');
+
+  activeStub.setConfig('detailRows', 9);
+  await activeStub.fireConfigurationChange('traecnquota.detailRows');
+  await settle();
+  assert.strictEqual(dataRows(bodySvgOf(activeStub)), 6, '9 要夹到上限 6');
+
+  activeStub.setConfig('detailRows', 6);
+  await activeStub.fireConfigurationChange('traecnquota.detailRows');
+  await settle();
+  assert.strictEqual(dataRows(bodySvgOf(activeStub)), 6, '上限本身 6 行要全部渲染');
   globalThis.fetch = undefined;
 });

@@ -78,15 +78,15 @@
           "category": "TraeCN Quota",
           "type": "number",
           "default": 3,
-          "minimum": 2,
-          "maximum": 5,
-          "markdownDescription": "积分包显示数量，按到期时间升序，超出的不显示。可调 `2` ~ `5`。"
+          "minimum": 1,
+          "maximum": 6,
+          "markdownDescription": "积分包显示数量，按到期时间升序，超出的不显示。可调 `1` ~ `6`。"
         },
         "traecnquota.autoCheckin": {
           "category": "TraeCN Quota",
           "type": "boolean",
           "default": true,
-          "markdownDescription": "每天自动签到，成功后当天不再重复。开着本项时，当天还没领到就点状态栏图标刷新补领；关闭后只能执行 **TraeCN Quota: 立即签到** 手动补领。"
+          "markdownDescription": "每天自动签到，成功后当天不再重复。如签到失败请手动点击图标补签（同一设备只能签到一个账户）"
         },
         "traecnquota.edition": {
           "category": "TraeCN Quota",
@@ -115,7 +115,7 @@
           "type": "string",
           "default": "",
           "format": "password",
-          "markdownDescription": "手动指定 accessToken。（最高优先，重复填写自动覆盖旧值）自动存进加密保管箱并清空 `settings.json`。如需弃用，请执行命令 **TraeCN Quota: 清除保管箱里的手动 Token**。留空则自动从 Trae 客户端的本地登录态解密获取。"
+          "markdownDescription": "手动指定 accessToken。（最高优先，重复填写自动收进保管箱并覆盖旧值）如需弃用，请执行命令 TraeCN Quota: 清除保管箱里的值。留空则自动从本地登录态获取。"
         }
       }
     }

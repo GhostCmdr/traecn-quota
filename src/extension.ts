@@ -293,7 +293,7 @@ async function resolveAuth(): Promise<TraeAuth> {
   return auth;
 }
 
-/** 明细行数：未配置回落到默认值，可配 2~5，手改成非数字也回落到默认而不是空表 */
+/** 明细行数：未配置回落到默认值，可配 1~6，手改成非数字也回落到默认而不是空表 */
 function detailRows(): number {
   // 用 unknown 接收：settings.json 是用户手可改的，类型不受 schema 约束
   const raw = cfg().get<unknown>('detailRows');
@@ -304,7 +304,7 @@ function detailRows(): number {
   if (!Number.isFinite(n)) {
     return DEFAULT_DETAIL_ROWS;
   }
-  return Math.min(Math.max(Math.trunc(n), 2), 5);
+  return Math.min(Math.max(Math.trunc(n), 1), 6);
 }
 
 /** 终端显示宽度：CJK 全角字符按 2 格计，用于 SVG 内名称截断 */

@@ -34,7 +34,7 @@
 | 设置 | 默认 | 说明 |
 |---|---|---|
 | `traecnquota.refreshInterval` | `30` | 自动刷新间隔（分钟），`0` 关闭 |
-| `traecnquota.detailRows` | `3` | 积分包显示条数，可调 `2` ~ `5` |
+| `traecnquota.detailRows` | `3` | 积分包显示条数，可调 `1` ~ `6` |
 | `traecnquota.autoCheckin` | `true` | 每天自动领一次签到积分 |
 | `traecnquota.edition` | `auto` | 读取哪个国内版客户端的登录态 |
 | `traecnquota.manualToken` | 空 | 手动 accessToken，填一次即收进保管箱并清空 |

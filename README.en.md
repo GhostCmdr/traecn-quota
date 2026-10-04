@@ -34,7 +34,7 @@ If neither is available, the status bar shows "no login session found".
 | Setting | Default | Description |
 |---|---|---|
 | `traecnquota.refreshInterval` | `30` | Auto-refresh interval in minutes, `0` disables |
-| `traecnquota.detailRows` | `3` | Number of credit packs shown, range `2`–`5` |
+| `traecnquota.detailRows` | `3` | Number of credit packs shown, range `1`–`6` |
 | `traecnquota.autoCheckin` | `true` | Claim the daily check-in automatically, once a day |
 | `traecnquota.edition` | `auto` | Which mainland client's login session to read |
 | `traecnquota.manualToken` | empty | Manual access token; entered once, then moved to the secret store and cleared |
