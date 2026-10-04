@@ -86,7 +86,7 @@
           "category": "TraeCN Quota",
           "type": "boolean",
           "default": true,
-          "markdownDescription": "每天自动签到，当天领成后不再重复。开着时随打开编辑器/刷新自动补领；关掉后白天不领，只在当天 23:50 保底领一次。也可执行 **TraeCN Quota: 立即签到** 手动补领。"
+          "markdownDescription": "每天自动签到，成功后当天不再重复。开着本项时，当天还没领到就点状态栏图标刷新补领；关闭后只能执行 **TraeCN Quota: 立即签到** 手动补领。"
         },
         "traecnquota.edition": {
           "category": "TraeCN Quota",

@@ -121,7 +121,6 @@ function makeVscodeStub(initialConfig = {}, options = {}) {
   return {
     vscode, calls, commands, statusItems, secrets, logs,
     getGlobalState: key => globalStateMap.get(key),
-    setGlobalState: (key, value) => void globalStateMap.set(key, value),
     setGlobalStateGetThrows(value) { stateGetThrows = value; },
     /** activate() 要用的 ExtensionContext 替身 */
     context: {
@@ -1465,18 +1464,14 @@ test('23:50 保底失败后当天不再重试，下一发排到明天同一刻',
 });
 
 /**
- * 23:50 保底不受 autoCheckin 开关管辖：那个开关管的是「白天跟随打开/刷新去领」，
- * 保底是「当天无论如何补一次」。所以关掉开关后，白天照旧不领，23:50 仍要试一次；
- * 当天已经领成则连保底也不发（日期守卫仍然生效）。
+ * 关掉自动签到 = 完全不自动，连当天 23:50 的保底也不发（保底只服务于「开着但白天没领成」）。
+ * 这条是那次「让保底越过开关」改动的反证：改动一进来它就红。
  */
-test('关掉自动签到后，白天不领但 23:50 保底仍领一次', async t => {
+test('关掉自动签到后，23:50 保底也不领', async t => {
   const urls = [];
   globalThis.fetch = async url => {
     const u = String(url);
     urls.push(u);
-    if (u.includes('claim')) {
-      return { status: 200, text: async () => JSON.stringify({ code: 0 }) };
-    }
     return { status: 200, text: async () => JSON.stringify(u.includes('checkin') ? { enable: true, checked_in: false } : usageBody) };
   };
   const drain = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setImmediate(r)); };
@@ -1487,37 +1482,10 @@ test('关掉自动签到后，白天不领但 23:50 保底仍领一次', async t
     const ext = withCleanup(t, freshRequire());
     ext.activate(activeStub.context);
     await drain();
-    assert.strictEqual(claimsOf(urls).length, 0, '开关关掉，白天启动不该领');
-
+    assert.strictEqual(claimsOf(urls).length, 0, '白天启动不该领');
     mock.timers.tick((13 * 60 + 50) * 60 * 1000); // 10:00 → 23:50
     await drain();
-    assert.strictEqual(claimsOf(urls).length, 1, '23:50 保底必须领一次');
-    assert.match(activeStub.getGlobalState('traecnquota.lastCheckinSuccessDate'), /^2026-10-04$/, '领成功要写当天日期');
-  } finally {
-    mock.timers.reset();
-    globalThis.fetch = undefined;
-  }
-});
-
-test('关掉自动签到且当天已领成时，23:50 保底也不发请求', async t => {
-  const urls = [];
-  globalThis.fetch = async url => {
-    const u = String(url);
-    urls.push(u);
-    return { status: 200, text: async () => JSON.stringify(u.includes('checkin') ? { enable: true, checked_in: true } : usageBody) };
-  };
-  const drain = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setImmediate(r)); };
-  mock.timers.enable({ apis: ['setTimeout', 'Date'] });
-  mock.timers.setTime(new Date(2026, 9, 4, 10, 0, 0, 0).getTime());
-  try {
-    activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: false });
-    activeStub.setGlobalState('traecnquota.lastCheckinSuccessDate', '2026-10-04');
-    const ext = withCleanup(t, freshRequire());
-    ext.activate(activeStub.context);
-    await drain();
-    mock.timers.tick((13 * 60 + 50) * 60 * 1000);
-    await drain();
-    assert.strictEqual(claimsOf(urls).length, 0, '当天已领成，保底也不能重复领');
+    assert.strictEqual(claimsOf(urls).length, 0, '关掉开关后 23:50 也不该领');
   } finally {
     mock.timers.reset();
     globalThis.fetch = undefined;
