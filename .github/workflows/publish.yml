@@ -89,5 +89,13 @@ jobs:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: |
           vsix="$(ls ./*.vsix | head -n1)"
-          # ovsx 对「同版本已发布」返回非零退出码，这里容忍它，避免重复推 tag 时整条流水线红
-          npx --yes ovsx publish "$vsix" -p "$OVSX_PAT" || echo "Open VSX 发布未成功（可能该版本已存在），请手动核对。"
+          version="$(node -p "require('./package.json').version")"
+          ns="$(node -p "require('./package.json').publisher")"
+          name="$(node -p "require('./package.json').name")"
+          # 重复推同一个 tag 时该版本已存在，先查再决定，跳过即可（与 Marketplace 那步同一套写法）。
+          # 这里不用 `|| echo` 兜底：那会把 PAT 过期、网络不通之类的真失败伪装成绿灯。
+          if curl -sf -o /dev/null "https://open-vsx.org/api/$ns/$name/$version"; then
+            echo "v$version 已在 Open VSX 上（重复推 tag），跳过发布。"
+            exit 0
+          fi
+          npx --yes ovsx publish "$vsix" -p "$OVSX_PAT"
