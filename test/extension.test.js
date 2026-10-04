@@ -8,7 +8,7 @@ const OUT = path.resolve(__dirname, '..', 'out');
 
 /**
  * 产品默认 autoCheckin 为 true（package.json 的 default），桩工厂照此默认，不做任何测试侧改写。
- * 「一轮启动 = 几个请求」这类计数用例与签到无关却会被默认开启的 claim 打乱（还多一份排到次日凌晨的兜底定时器），
+ * 「一轮启动 = 几个请求」这类计数用例与签到无关却会被默认开启的 claim 打乱（还多一份排到当天 23:50 的兜底定时器），
  * 所以它们走 makeStubCheckinOff —— 关闭态在用例名一眼可见，而不是藏在工厂里。
  */
 function makeVscodeStub(initialConfig = {}, options = {}) {
@@ -191,7 +191,7 @@ function freshRequire() {
 }
 
 /**
- * activate() 的实例统一在这里收口：deactivate() 销毁排到次日凌晨的签到兜底定时器，
+ * activate() 的实例统一在这里收口：deactivate() 销毁排到当天 23:50 的签到兜底定时器，
  * fetch 桩一并卸掉。自动签到默认开启后每个用例都可能留下 ref 着的 timer，
  * 靠各用例手写 ext.deactivate() 迟早漏一条并把整个测试进程吊住。
  */
@@ -1165,13 +1165,13 @@ test('claim 失败时弹错误通知，且不写成功日期，下次刷新还�
   await activeStub.commands.get('traecnquota.refresh')();
   await settle();
   assert.strictEqual(claimsOf(urls).length, before + 1, '失败后再点刷新必须真的重试一次 claim');
-  // 签失败会留下排到次日凌晨的兜底定时器，由 withCleanup 的 deactivate 收掉，否则测试进程一直等下去
+  // 签失败会留下排到当天 23:50 的兜底定时器，由 withCleanup 的 deactivate 收掉，否则测试进程一直等下去
 });
 
 /**
  * 兜底定时器的回调必须自带 .catch：tryClaim 的 try/catch 只盖得住它自己那一段，
  * 日期守卫读 memento 这类前置抛出点在外面，Node 对 floating rejection 默认直接终止进程。
- * 观测办法是把 globalState 读取打坏，再用假定时器真的跳出次日凌晨那一格：
+ * 观测办法是把 globalState 读取打坏，再用假定时器真的跳出下一个 23:50 那一格：
  * 有 catch → 只多一行日志；没 catch → 这颗 rejection 无人认领、用例判红（删掉 catch 做过变异实测）。
  */
 test('定时补签抛出异常时只留一行日志，不把 unhandledRejection 抛给进程', async t => {
@@ -1399,5 +1399,24 @@ test('标题行用量图标在 Trae 宿主指向内部命令', async t => {
   const md = String(activeStub.statusItems[0].tooltip.value);
   assert.ok(md.includes('command:workbench.action.icubeOpenUsageDetails'), 'Trae 宿主要点向用量管理页');
   assert.ok(!md.includes('www.trae.cn/dashboard'), 'Trae 宿主不该退回网页');
+  globalThis.fetch = undefined;
+});
+
+/**
+ * 兜底时刻的设计：签到按本地日切算，当天 23:50 之前失败都还有救，所以兜底排在「下一个 23:50」；
+ * 排到次日凌晨等于放弃当天——那天再也不会被重试（除非用户自己开编辑器刷新）。
+ * 恰好等于 23:50 时排明天，避免 0 延迟风暴。
+ */
+test('nextCheckinRetryAt：当天 23:50 前排当天，已过则排明天同一刻', () => {
+  countingFetch();
+  activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0 });
+  const { nextCheckinRetryAt } = freshRequire();
+  const at = (h, m) => new Date(2026, 9, 4, h, m, 0, 0);
+  const want = (day, h, m) => new Date(2026, 9, day, h, m, 0, 0).getTime();
+
+  assert.strictEqual(nextCheckinRetryAt(at(8, 0)).getTime(), want(4, 23, 50), '早上八点后失败 → 当晚 23:50');
+  assert.strictEqual(nextCheckinRetryAt(at(23, 49)).getTime(), want(4, 23, 50), '差一分钟也还在当天');
+  assert.strictEqual(nextCheckinRetryAt(at(23, 50)).getTime(), want(5, 23, 50), '正好 23:50 算已过，排明天');
+  assert.strictEqual(nextCheckinRetryAt(at(23, 59)).getTime(), want(5, 23, 50), '当天最后一刻之后 → 明天 23:50');
   globalThis.fetch = undefined;
 });

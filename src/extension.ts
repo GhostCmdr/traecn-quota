@@ -26,7 +26,7 @@ let checkinStateDay = '';
 let checkinNote = '';
 /** globalState 里「最近一次签到成功的日期」的键名 */
 const LAST_CHECKIN_DATE_KEY = 'traecnquota.lastCheckinSuccessDate';
-/** 当天兜底定时器：只在「今天还没签成」时排到次日凌晨，签成功即销毁 */
+/** 当天兜底定时器：只在「今天还没签成」时排到当天 23:50，签成功即销毁 */
 let checkinTimer: NodeJS.Timeout | undefined;
 /** 同一时刻只允许一次 claim，避免启动刷新与手动命令叠加 */
 let claiming = false;
@@ -804,12 +804,23 @@ function autoCheckinEnabled(): boolean {
  * 编辑器一直开着跨过零点时，靠这个定时器补签。
  * 只在「当天还没签成」时存在，全天最多醒一次，签成功即销毁——不做任何轮询。
  */
+/**
+ * 兜底补签的时刻 = 下一个本地 23:50。签到按本地日切算，当天 23:50 之前失败都还来得及再试；
+ * 排到次日凌晨等于放弃当天（那天再不会被动重试），所以不那么排。
+ * 恰好落在 23:50 或之后则顺延到明天同一刻，顺带避免 0 延迟的重排风暴。
+ */
+export function nextCheckinRetryAt(now: Date): Date {
+  const sameDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 50, 0, 0);
+  if (sameDay.getTime() > now.getTime()) {
+    return sameDay;
+  }
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 23, 50, 0, 0);
+}
+
 function scheduleCheckinRetry(): void {
   clearCheckinTimer();
   const now = new Date();
-  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 5, 0);
-  // 跨过零点后才被排上时 next 会落到后天，delay 只会偏长不会偏短；下限兜住时钟回拨之类的异常
-  const delayMs = Math.max(next.getTime() - now.getTime(), 60_000);
+  const delayMs = nextCheckinRetryAt(now).getTime() - now.getTime();
   checkinTimer = setTimeout(() => {
     checkinTimer = undefined;
     // 与同文件另两处 fire-and-forget 的惯例一致：尾巴必须挂 catch——floating rejection 会终止进程
@@ -925,7 +936,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   scheduleRefresh();
 
-  // 冷启动补偿：当天还没签成（比如编辑器整天没开过）时排一次次日凌晨的兜底，签成功即销毁
+  // 冷启动补偿：当天还没签成（比如编辑器整天没开过）时排一次当天 23:50 的兜底，签成功即销毁
   if (autoCheckinEnabled() && shouldClaim(context.globalState.get<string>(LAST_CHECKIN_DATE_KEY), todayString())) {
     scheduleCheckinRetry();
   }
