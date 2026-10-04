@@ -8,6 +8,9 @@ preview/theme-check.html
 preview/_*.png
 preview/_*.html
 
+# 内部实施计划只留在本机：会被 git add -A 顺带提交，而仓库是公开的
+documents/plans/
+
 # 编辑器与系统噪音
 .DS_Store
 Thumbs.db
