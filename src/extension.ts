@@ -121,13 +121,18 @@ function fmtQuota(value: number, unlimited: boolean): string {
   return unlimited ? '不限量' : fmtCredits(value);
 }
 
+/** 到期时间只到分钟：秒对用户没用，还占明细末列的宽度预算 */
 function fmtTime(seconds?: number): string {
   if (!seconds) {
     return '-';
   }
   const d = new Date(seconds * 1000);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+/** 两位补零；到期时间与页脚的更新时间共用 */
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
 }
 
 function timesUp(expiredAt?: string): boolean {
@@ -616,8 +621,9 @@ export function buildTooltipBody(
   const dotColor = checked ? '#4caf50' : checkin === '今日未签到' ? '#d7a33a' : pal.muted;
   parts.push(`<circle cx="3.5" cy="${footBase - (TXT_ASC - TXT_DESC) / 2}" r="3.5" fill="${dotColor}"/>`);
   parts.push(`<text x="12" y="${footBase}" fill="${pal.body}" font-size="11">${escHtml(checkin || '签到未查询')}</text>`);
+  const fetchedClock = new Date(fetchedAt);
   parts.push(
-    `<text x="${RIGHT}" y="${footBase}" fill="${pal.muted}" font-size="10" text-anchor="end">更新 ${escHtml(new Date(fetchedAt).toLocaleTimeString())}</text>`
+    `<text x="${RIGHT}" y="${footBase}" fill="${pal.muted}" font-size="10" text-anchor="end">更新 ${pad2(fetchedClock.getHours())}:${pad2(fetchedClock.getMinutes())}</text>`
   );
 
   // SVG 在 tooltip 里落在 38.7px 处，整体下移 0.3 让所有元素压在整数像素行上，

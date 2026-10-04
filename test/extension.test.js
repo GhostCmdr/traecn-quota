@@ -1649,3 +1649,19 @@ test('签到成功的提示带上用户名，9095 提示改成「当前设备已
   isolate.restore();
   globalThis.fetch = undefined;
 });
+
+/** 到期时间与更新时间都只到分钟：秒对用户没有意义，还白占到期列的宽度预算 */
+test('到期时间与底部的更新时间都只显示到分钟', async t => {
+  countingFetch();
+  activeStub = makeStubCheckinOff({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0 });
+  const ext = withCleanup(t, freshRequire());
+  ext.activate(activeStub.context);
+  await settle();
+  const svg = bodySvgOf(activeStub);
+  const expire = (svg.match(/font-size="9\.5"[^>]*>([^<]+)</) || [])[1];
+  assert.ok(expire, '明细行的到期时间没找到：' + svg.slice(0, 300));
+  assert.match(expire, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/, '到期时间不该带秒，实际是 ' + expire);
+  const stamp = (svg.match(/更新 ([^<]+)</) || [])[1];
+  assert.match(stamp, /^\d{1,2}:\d{2}$/, '更新时间不该带秒，实际是 ' + stamp);
+  globalThis.fetch = undefined;
+});
