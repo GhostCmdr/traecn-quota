@@ -743,6 +743,32 @@ async function refreshCheckinState(auth: TraeAuth): Promise<void> {
 }
 
 /**
+ * 日期守卫按账号分桶。同一台机器上常同时存在 Trae CN 与 TRAE SOLO CN 两个账号，
+ * 共用一个日期会让先领的那个把另一个挡掉一整天（切 edition 后刷新也不会补领）。
+ * 桶名优先用 userId，拿不到（手动 Token）时退回 edition。
+ */
+function claimDateOf(accountKey: string): string | undefined {
+  const stored = extContext?.globalState.get<unknown>(LAST_CHECKIN_DATE_KEY);
+  if (typeof stored === 'string') {
+    // 旧格式只存了一个日期串：按默认客户端那次算，避免升级当天重复领一次
+    return accountKey === 'cn' ? stored : undefined;
+  }
+  if (stored && typeof stored === 'object') {
+    const value = (stored as Record<string, unknown>)[accountKey];
+    return typeof value === 'string' ? value : undefined;
+  }
+  return undefined;
+}
+
+async function recordClaimDate(accountKey: string, day: string): Promise<void> {
+  const stored = extContext?.globalState.get<unknown>(LAST_CHECKIN_DATE_KEY);
+  const map =
+    stored && typeof stored === 'object' && typeof stored !== 'string' ? { ...(stored as Record<string, string>) } : {};
+  map[accountKey] = day;
+  await extContext?.globalState.update(LAST_CHECKIN_DATE_KEY, map);
+}
+
+/**
  * 领一次签到。成功才写日期守卫，失败保持原样让下一次刷新自然重试；成败都弹通知（产品定稿）。
  * @param manual 手动命令传 true：被日期守卫挡掉时改为提示「今日已签到」并刷新余额；
  *               自动路径传 false 保持静默，否则每轮刷新都会弹打扰。
@@ -755,25 +781,23 @@ async function tryClaim(manual: boolean): Promise<void> {
   }
   // 日期在发请求前取定：claim 响应若跨过零点才落定，服务端按发出时刻记的是前一天，守卫也必须写同一天。
   const day = todayString();
-  // 守卫收在发 claim 的唯一函数里而不是 maybeAutoClaim：手动命令同受「签成后不再重发」契约约束，
-  // 后人新增调用点也绕不过去。此分支没发过 claim，调用 refresh 不构成回环。
-  if (!shouldClaim(extContext?.globalState.get<string>(LAST_CHECKIN_DATE_KEY), day)) {
-    if (manual) {
-      vscode.window.showInformationMessage('TraeCN 今日已签到，无需重复领取');
-      await refresh(true);
-    }
-    return;
-  }
   claiming = true;
+  let alreadyClaimed = false;
   try {
+    // 先解析账号再判守卫：守卫按账号分桶，读的哪份登录态就记谁的账。
     const auth = await resolveAuth();
-    await claimCheckin(auth);
-    await extContext?.globalState.update(LAST_CHECKIN_DATE_KEY, day);
-    clearCheckinTimer();
-    log(`${day} 签到成功`);
-    vscode.window.showInformationMessage('TraeCN 签到成功');
-    // 不在这里再调 refresh()：那会经 maybeAutoClaim 回到 tryClaim 形成回环。
-    // 自动路径的积分刷新本来就在同一轮 refresh 里已经取过；手动命令则交给下一次定时刷新反映新余额。
+    const accountKey = auth.userId || auth.edition;
+    if (!shouldClaim(claimDateOf(accountKey), day)) {
+      alreadyClaimed = true;
+    } else {
+      await claimCheckin(auth);
+      await recordClaimDate(accountKey, day);
+      clearCheckinTimer();
+      log(`${day} 签到成功（${auth.edition}）`);
+      vscode.window.showInformationMessage('TraeCN 签到成功');
+      // 不在这里再调 refresh()：那会经 maybeAutoClaim 回到 tryClaim 形成回环。
+      // 自动路径的积分刷新本来就在同一轮 refresh 里已经取过；手动命令则交给下一次定时刷新反映新余额。
+    }
   } catch (err) {
     const message = messageOf(err);
     const remoteDetail = (err as Partial<import('./api').ApiError>).remoteDetail;
@@ -783,6 +807,12 @@ async function tryClaim(manual: boolean): Promise<void> {
     scheduleCheckinRetry();
   } finally {
     claiming = false;
+  }
+  // 被守卫挡掉的手动命令：提示 + 刷一次余额。放在锁外，refresh 内部的自动 claim 才不会撞锁，
+  // 它本身的失败也不该被上面那个 catch 说成「签到失败」。
+  if (alreadyClaimed && manual) {
+    vscode.window.showInformationMessage('TraeCN 今日已签到，无需重复领取');
+    await refresh(true);
   }
 }
 

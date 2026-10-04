@@ -802,6 +802,9 @@ test('不限量与有限额包并存：整体仍按有限额算占比，只有�
   globalThis.fetch = undefined;
 });
 
+/** 日期守卫按账号分桶存成对象；手动 Token 的桶名是 manual */
+const guardDate = (stub, key = 'manual') => (stub.getGlobalState('traecnquota.lastCheckinSuccessDate') || {})[key];
+
 /** 根 <svg> 标签的 height —— 正则必须锚定 svg 开标签，内部 rect/line 也有自己的 height 属性 */
 const rootSvgHeight = svg => {
   const m = /<svg [^>]*\bheight="(\d+)"/.exec(svg);
@@ -1044,7 +1047,7 @@ test('开启自动签到时，刷新会领一次签到并记下今天日期', as
   ext.activate(activeStub.context);
   await settle();
   assert.strictEqual(claimsOf(urls).length, 1, '应当恰好发一次 claim');
-  assert.match(activeStub.getGlobalState('traecnquota.lastCheckinSuccessDate'), /^\d{4}-\d{2}-\d{2}$/);
+  assert.match(guardDate(activeStub), /^\d{4}-\d{2}-\d{2}$/);
   assert.strictEqual(activeStub.calls.info.some(m => /签到成功/.test(m)), true, '成功要弹通知');
   // 签成后兜底定时器已被 clearCheckinTimer 销毁，withCleanup 的 deactivate 只收刷新定时器
 });
@@ -1052,7 +1055,7 @@ test('开启自动签到时，刷新会领一次签到并记下今天日期', as
 test('当天已签成功时，再刷新只刷积分不再发 claim', async t => {
   const today = new Date().toLocaleDateString('sv');
   const urls = countingFetch();
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true }, { globalState: { 'traecnquota.lastCheckinSuccessDate': today } });
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true }, { globalState: { 'traecnquota.lastCheckinSuccessDate': { manual: today } } });
   const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
@@ -1085,7 +1088,7 @@ test('关掉自动签到后不发 claim，但手动命令仍能签', async t => 
 test('当天已签成功后再点手动命令：不发 claim，积分照常刷新，提示已签到', async t => {
   const today = new Date().toLocaleDateString('sv');
   const urls = countingFetch();
-  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: false }, { globalState: { 'traecnquota.lastCheckinSuccessDate': today } });
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: false }, { globalState: { 'traecnquota.lastCheckinSuccessDate': { manual: today } } });
   const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
@@ -1125,7 +1128,7 @@ test('不写 autoCheckin 设置时按产品默认开启：一次启动恰好领�
   assert.strictEqual(activeStub.getConfig('autoCheckin'), undefined, '确认这一轮确实没给任何 autoCheckin 值');
   assert.strictEqual(claimsOf(urls).length, 1, '默认态必须真的领一次签到');
   assert.strictEqual(urls.length, 3, `默认开启的一轮启动应为积分+签到状态+领取三个请求，实发 ${urls.length}：${urls.join(', ')}`);
-  assert.match(activeStub.getGlobalState('traecnquota.lastCheckinSuccessDate'), /^\d{4}-\d{2}-\d{2}$/, '领成功要写下日期守卫');
+  assert.match(guardDate(activeStub), /^\d{4}-\d{2}-\d{2}$/, '领成功要写下日期守卫');
 });
 
 /**
@@ -1194,9 +1197,12 @@ test('定时补签抛出异常时只留一行日志，不把 unhandledRejection 
     activeStub.setGlobalStateGetThrows(true);
     mock.timers.tick(25 * 60 * 60 * 1000);
     await settle();
-    assert.ok(activeStub.logs.some(l => /定时补签失败：globalState 存储层读不出来/.test(l)), '补签的异常要以日志收尾');
+    // 守卫读失败现在落在 tryClaim 自己的 catch 里（守卫要按账号分桶，必须先进 try 解析账号），
+    // 所以日志是「签到失败」而不是「定时补签失败」；定时器尾巴上的 .catch 仍留着当兜底网。
+    // 要害是这条：异常必须有归属，一旦没人认领 Node 会直接终止进程，用例根本跑不完。
+    assert.ok(activeStub.logs.some(l => /globalState 存储层读不出来/.test(l)), '补签的异常要以日志收尾');
     assert.strictEqual(claimsOf(urls).length, 1, '守卫都没走过去，不该把 claim 补发出去');
-    assert.strictEqual(activeStub.getGlobalState('traecnquota.lastCheckinSuccessDate'), undefined, '抛出的一轮不能记成签到成功');
+    assert.deepStrictEqual(activeStub.getGlobalState('traecnquota.lastCheckinSuccessDate'), undefined, '抛出的一轮不能记成签到成功');
   } finally {
     mock.timers.reset();
     globalThis.fetch = undefined;
@@ -1225,7 +1231,7 @@ test('签到通知里不出现领取积分数值', async t => {
   ext.activate(activeStub.context);
   await settle();
   assert.strictEqual(claimsOf(urls).length, 1, '这一轮必须真的领一次，否则下面的断言是空过的');
-  assert.match(activeStub.getGlobalState('traecnquota.lastCheckinSuccessDate'), /^\d{4}-\d{2}-\d{2}$/, '写下日期守卫＝走的是成功分支');
+  assert.match(guardDate(activeStub), /^\d{4}-\d{2}-\d{2}$/, '写下日期守卫＝走的是成功分支');
   const toasts = [...activeStub.calls.info, ...activeStub.calls.error];
   assert.deepStrictEqual(toasts.filter(m => /签到/.test(m)), ['TraeCN 签到成功'], '成功通知就是定稿那一句，没有别的变体');
   assert.strictEqual(toasts.some(m => m.includes('8888')), false, '接口回的领取数量不许进 toast');
@@ -1490,4 +1496,34 @@ test('关掉自动签到后，23:50 保底也不领', async t => {
     mock.timers.reset();
     globalThis.fetch = undefined;
   }
+});
+
+/**
+ * 同一台机器上 CN 与 SOLO CN 常是两个不同账号，日期守卫必须按账号分桶。
+ * 否则先用 CN 领成功，切到 SOLO CN 后当天再也签不上——第二个账号白丢一天。
+ */
+test('切换凭证来源后，另一个账号当天仍要各自领一次', async t => {
+  const isolate = isolateLoginState('two-accounts');
+  const write = (clientDir, userId, token) => fs.writeFileSync(
+    isolate.storageJson(clientDir),
+    JSON.stringify({ 'iCubeAuthInfo://icube.cloudide': JSON.stringify({ token, userId, host: 'https://api.trae.cn' }) }),
+    'utf8'
+  );
+  write('Trae CN', '11111', 'token-cn');
+  write('TRAE SOLO CN', '22222', 'token-solo');
+  const urls = countingFetch();
+  activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0, autoCheckin: true, edition: 'cn' });
+  const ext = withCleanup(t, freshRequire());
+  ext.activate(activeStub.context);
+  await settle();
+  assert.strictEqual(claimsOf(urls).length, 1, 'CN 账号启动时领一次');
+
+  // 桩里 setConfig 只改值，事件要单独派发（真实环境是 update 之后由 VSCode 派发）
+  activeStub.setConfig('edition', 'solo-cn');
+  await activeStub.fireConfigurationChange('traecnquota.edition');
+  await settle();
+  await settle();
+  assert.strictEqual(claimsOf(urls).length, 2, '换到另一个账号必须再领一次，不能被前一个账号的日期挡掉');
+  isolate.restore();
+  globalThis.fetch = undefined;
 });
