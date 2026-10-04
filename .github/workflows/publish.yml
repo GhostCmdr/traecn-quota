@@ -5,10 +5,11 @@ on:
     tags:
       - 'v*'
 
-# contents: write 只给「挂到 GitHub Release」那步上传 .vsix 用。
-# 发 Marketplace 走的是 VSCE_PAT，跟这个仓库的权限无关。
+# contents: write 给「挂到 GitHub Release」那步上传 .vsix 用；VSCE_PAT 走 secret，与本权限无关。
+# id-token: write 是给 Open VSX 的受信发布用的：让 Actions 能拿到 OIDC 身份令牌去换临时发布凭证。
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   publish:
@@ -85,17 +86,17 @@ jobs:
           npx --yes @vscode/vsce publish --no-dependencies --pat "$VSCE_PAT"
 
       - name: 发布到 Open VSX
-        env:
-          OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: |
           vsix="$(ls ./*.vsix | head -n1)"
           version="$(node -p "require('./package.json').version")"
           ns="$(node -p "require('./package.json').publisher")"
           name="$(node -p "require('./package.json').name")"
           # 重复推同一个 tag 时该版本已存在，先查再决定，跳过即可（与 Marketplace 那步同一套写法）。
-          # 这里不用 `|| echo` 兜底：那会把 PAT 过期、网络不通之类的真失败伪装成绿灯。
+          # 这里不用 `|| echo` 兜底：那会把发布失败伪装成绿灯。
           if curl -sf -o /dev/null "https://open-vsx.org/api/$ns/$name/$version"; then
             echo "v$version 已在 Open VSX 上（重复推 tag），跳过发布。"
             exit 0
           fi
-          npx --yes ovsx publish "$vsix" -p "$OVSX_PAT"
+          # 受信发布：用上面 id-token: write 拿到的 OIDC 身份令牌现场换一张短期发布凭证，
+          # 不再需要 OVSX_PAT 这个长期 secret。对应 open-vsx.org 上命名空间 GhostCmdr 的注册项。
+          npx --yes ovsx publish "$vsix" --trusted-publishing
