@@ -1420,3 +1420,45 @@ test('nextCheckinRetryAt：当天 23:50 前排当天，已过则排明天同一�
   assert.strictEqual(nextCheckinRetryAt(at(23, 59)).getTime(), want(5, 23, 50), '当天最后一刻之后 → 明天 23:50');
   globalThis.fetch = undefined;
 });
+
+/**
+ * 23:50 是「当天最后一次保底」：触发后若仍失败，当天不再重试，下一发指向明天同一刻；
+ * 第二天照常由冷启动 / 定时刷新 / 明晚这次保底接管（成功即销毁，见另一条用例）。
+ */
+test('23:50 保底失败后当天不再重试，下一发排到明天同一刻', async t => {
+  const urls = [];
+  globalThis.fetch = async url => {
+    const u = String(url);
+    urls.push(u);
+    if (u.includes('checkin_credits/claim')) {
+      return { status: 200, text: async () => JSON.stringify({ code: 500, message: '服务繁忙' }) };
+    }
+    return { status: 200, text: async () => JSON.stringify(u.includes('checkin') ? { enable: true, checked_in: false } : usageBody) };
+  };
+  // Node 24 的 mock.timers 没有 tickAsync，回调里那串 await 只能靠若干轮 setImmediate 排空
+  const drain = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setImmediate(r)); };
+  mock.timers.enable({ apis: ['setTimeout', 'Date'] }); // 要连 Date 一起接管：scheduleCheckinRetry 读的是 new Date()
+  mock.timers.setTime(new Date(2026, 9, 4, 23, 49, 0, 0).getTime());
+  try {
+    activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true });
+    const ext = withCleanup(t, freshRequire());
+    ext.activate(activeStub.context);
+    await settle();
+    assert.strictEqual(claimsOf(urls).length, 1, '启动那一轮领了一次并失败');
+
+    mock.timers.tick(60_000); await drain(); // 到 23:50，保底开火
+    await settle();
+    assert.strictEqual(claimsOf(urls).length, 2, '23:50 应当再补一次');
+
+    mock.timers.tick(60 * 60 * 1000); await drain(); // 当天剩下的时间：不该再有第三次
+    await settle();
+    assert.strictEqual(claimsOf(urls).length, 2, '保底失败后当天不再重试');
+
+    mock.timers.tick(24 * 60 * 60 * 1000); await drain(); // 明天 23:50，新一天的保底
+    await settle();
+    assert.strictEqual(claimsOf(urls).length, 3, '第二天同一刻还要能再保底');
+  } finally {
+    mock.timers.reset();
+    globalThis.fetch = undefined;
+  }
+});
