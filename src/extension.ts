@@ -786,7 +786,8 @@ async function tryClaim(manual: boolean): Promise<void> {
   }
 }
 
-/** 自动路径的唯一入口：只看开关；日期守卫收在 tryClaim 里，避免两处各读一次 globalState */
+/** 跟随刷新/启动的自动路径入口：只看开关；日期守卫收在 tryClaim 里，避免两处各读一次 globalState。
+ *  23:50 保底不走这里——它是「当天无论如何补一次」，不受开关管辖。 */
 async function maybeAutoClaim(): Promise<void> {
   if (!autoCheckinEnabled()) {
     return;
@@ -823,8 +824,10 @@ function scheduleCheckinRetry(): void {
   const delayMs = nextCheckinRetryAt(now).getTime() - now.getTime();
   checkinTimer = setTimeout(() => {
     checkinTimer = undefined;
+    // 直接调 tryClaim 而非 maybeAutoClaim：保底不受 autoCheckin 开关管辖，只受日期守卫约束
+    // （当天领过就是空操作）。开关管的是「白天跟随启动/刷新去领」。
     // 与同文件另两处 fire-and-forget 的惯例一致：尾巴必须挂 catch——floating rejection 会终止进程
-    void maybeAutoClaim().catch(err => log(`定时补签失败：${messageOf(err)}`));
+    void tryClaim(false).catch(err => log(`定时补签失败：${messageOf(err)}`));
   }, delayMs);
 }
 
@@ -936,8 +939,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   scheduleRefresh();
 
-  // 冷启动补偿：当天还没签成（比如编辑器整天没开过）时排一次当天 23:50 的兜底，签成功即销毁
-  if (autoCheckinEnabled() && shouldClaim(context.globalState.get<string>(LAST_CHECKIN_DATE_KEY), todayString())) {
+  // 冷启动补偿：当天还没签成（比如编辑器整天没开过）时排一次当天 23:50 的保底，签成功即销毁。
+  // 不看 autoCheckin：保底是「当天无论如何补一次」，关掉开关也要排。
+  if (shouldClaim(context.globalState.get<string>(LAST_CHECKIN_DATE_KEY), todayString())) {
     scheduleCheckinRetry();
   }
 
