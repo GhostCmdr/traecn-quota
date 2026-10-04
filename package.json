@@ -86,7 +86,7 @@
           "category": "TraeCN Quota",
           "type": "boolean",
           "default": true,
-          "markdownDescription": "每天自动领取一次 Trae 签到积分。领取成功当天不再重复领取；关闭后仍可手动执行 **TraeCN Quota: 立即签到**。"
+          "markdownDescription": "每天自动签到，成功后当天不再重复。开着本项时，当天还没领到就点状态栏图标刷新补领；关闭后只能执行 **TraeCN Quota: 立即签到** 手动补领。"
         },
         "traecnquota.edition": {
           "category": "TraeCN Quota",

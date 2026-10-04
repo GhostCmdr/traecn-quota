@@ -1160,6 +1160,11 @@ test('claim 失败时弹错误通知，且不写成功日期，下次刷新还�
   await settle();
   assert.strictEqual(activeStub.getGlobalState('traecnquota.lastCheckinSuccessDate'), undefined, '失败不能记成成功');
   assert.strictEqual(activeStub.calls.error.filter(m => /签到失败/.test(m)).length >= 1, true, '失败要弹错误通知');
+  // 标题里的另一半契约：当天没领到时，点状态栏图标（= 执行刷新命令）要能把 claim 重试出去
+  const before = claimsOf(urls).length;
+  await activeStub.commands.get('traecnquota.refresh')();
+  await settle();
+  assert.strictEqual(claimsOf(urls).length, before + 1, '失败后再点刷新必须真的重试一次 claim');
   // 签失败会留下排到次日凌晨的兜底定时器，由 withCleanup 的 deactivate 收掉，否则测试进程一直等下去
 });
 
