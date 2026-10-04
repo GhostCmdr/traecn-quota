@@ -457,11 +457,11 @@ function cachedIcon(key: string, build: () => string): string {
   return uri;
 }
 
-/** 标题栏右侧可点击图标：用量明细（三根等长横线，14px 下不糊） */
+/** 标题栏右侧可点击图标：用量明细（四根等长横线） */
 export function usageIconUri(color: string): string {
   return cachedIcon('u' + color, () =>
     svgDataUri(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><g fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round"><path d="M2.8 4.4h10.4"/><path d="M2.8 8h10.4"/><path d="M2.8 11.6h10.4"/></g></svg>`
+      `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><g fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round"><path d="M2.8 3.2h10.4"/><path d="M2.8 6.4h10.4"/><path d="M2.8 9.6h10.4"/><path d="M2.8 12.8h10.4"/></g></svg>`
     )
   );
 }
