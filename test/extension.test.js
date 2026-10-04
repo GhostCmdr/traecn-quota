@@ -1527,3 +1527,53 @@ test('切换凭证来源后，另一个账号当天仍要各自领一次', async
   isolate.restore();
   globalThis.fetch = undefined;
 });
+
+/**
+ * 9095 = 服务端「当前设备今日已经签到」。这条限制是按设备算的，所以同一台机器上的
+ * 第二个账号当天必然拿不到——对插件来说这是良性结果，不该弹红框、也不该 30 分钟重试一次。
+ */
+test('claim 返回 9095 时按已签处理：不报错、记下日期、之后不再重试', async t => {
+  const urls = [];
+  globalThis.fetch = async url => {
+    const u = String(url);
+    urls.push(u);
+    if (u.includes('checkin_credits/claim')) {
+      return { status: 200, text: async () => JSON.stringify({ code: 9095, message: '当前设备今日已经签到，请明日再来哦～' }) };
+    }
+    return { status: 200, text: async () => JSON.stringify(u.includes('checkin') ? { enable: true, checked_in: false } : usageBody) };
+  };
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true });
+  const ext = withCleanup(t, freshRequire());
+  ext.activate(activeStub.context);
+  await settle();
+  assert.strictEqual(claimsOf(urls).length, 1, '先真的发一次 claim');
+  assert.deepStrictEqual(activeStub.calls.error, [], '设备级已签不是失败，不该弹错误通知');
+  assert.match(guardDate(activeStub), /^\d{4}-\d{2}-\d{2}$/, '要记下今天，否则每轮刷新都会再撞一次');
+
+  await activeStub.commands.get('traecnquota.refresh')();
+  await settle();
+  assert.strictEqual(claimsOf(urls).length, 1, '记下之后刷新不得再发 claim');
+  globalThis.fetch = undefined;
+});
+
+test('手动签到撞上 9095 时给中性提示', async t => {
+  const urls = [];
+  globalThis.fetch = async url => {
+    const u = String(url);
+    urls.push(u);
+    if (u.includes('checkin_credits/claim')) {
+      return { status: 200, text: async () => JSON.stringify({ code: 9095, message: '当前设备今日已经签到，请明日再来哦～' }) };
+    }
+    return { status: 200, text: async () => JSON.stringify(u.includes('checkin') ? { enable: true, checked_in: true } : usageBody) };
+  };
+  activeStub = makeVscodeStub({ manualToken: 'fake-token', detailRows: 3, refreshInterval: 0, autoCheckin: true });
+  const ext = withCleanup(t, freshRequire());
+  ext.activate(activeStub.context);
+  await settle();
+  activeStub.calls.info.length = 0;
+  await activeStub.commands.get('traecnquota.checkin')();
+  await settle();
+  assert.ok(activeStub.calls.info.some(m => /本机今日已签到|今日已签到/.test(m)), '要提示已签到而不是失败');
+  assert.deepStrictEqual(activeStub.calls.error, [], '不该出现失败红框');
+  globalThis.fetch = undefined;
+});

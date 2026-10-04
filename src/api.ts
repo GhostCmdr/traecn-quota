@@ -109,6 +109,8 @@ export interface ApiError extends Error {
   remoteDetail?: string;
   /** HTTP 状态码，用于区分「真 401」与「业务 code 里带 401」 */
   httpStatus?: number;
+  /** 业务信封里的 code，调用方要按它区分良性结果（如 9095 设备今日已签）与真失败 */
+  bizCode?: number;
 }
 
 /**
@@ -193,7 +195,9 @@ async function postJson<T extends { code?: number; message?: string }>(auth: Tra
   // 服务端会用 HTTP 200 包裹业务错误，不检查 code 就会把错误信封当成空数据。
   // message 是远程文本，只进 remoteDetail，不进用户可见消息。
   if (typeof data.code === 'number' && data.code !== 0) {
-    throw apiError(`接口 ${apiPath} 返回业务错误 code=${data.code}`, data.message, res.status);
+    const err = apiError(`接口 ${apiPath} 返回业务错误 code=${data.code}`, data.message, res.status);
+    err.bizCode = data.code;
+    throw err;
   }
   return data;
 }

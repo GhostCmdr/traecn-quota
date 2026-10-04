@@ -26,6 +26,12 @@ let checkinStateDay = '';
 let checkinNote = '';
 /** globalState 里「最近一次签到成功的日期」的键名 */
 const LAST_CHECKIN_DATE_KEY = 'traecnquota.lastCheckinSuccessDate';
+/**
+ * claim 接口的业务 code 9095：服务端应答文案是「当前设备今日已经签到，请明日再来哦～」。
+ * 实测（2026-10-04，同机两个账号）确认这条限制按设备算——CN 领过之后，SOLO CN 那个
+ * 账号用自己客户端的指纹来领也会被拒。所以它是良性结果，不是失败。
+ */
+const CLAIM_DEVICE_ALREADY_TODAY = 9095;
 /** 当天兜底定时器：只在「今天还没签成」时排到当天 23:50，签成功即销毁 */
 let checkinTimer: NodeJS.Timeout | undefined;
 /** 同一时刻只允许一次 claim，避免启动刷新与手动命令叠加 */
@@ -783,10 +789,11 @@ async function tryClaim(manual: boolean): Promise<void> {
   const day = todayString();
   claiming = true;
   let alreadyClaimed = false;
+  let accountKey = '';
   try {
     // 先解析账号再判守卫：守卫按账号分桶，读的哪份登录态就记谁的账。
     const auth = await resolveAuth();
-    const accountKey = auth.userId || auth.edition;
+    accountKey = auth.userId || auth.edition;
     if (!shouldClaim(claimDateOf(accountKey), day)) {
       alreadyClaimed = true;
     } else {
@@ -799,6 +806,17 @@ async function tryClaim(manual: boolean): Promise<void> {
       // 自动路径的积分刷新本来就在同一轮 refresh 里已经取过；手动命令则交给下一次定时刷新反映新余额。
     }
   } catch (err) {
+    // 服务端的签到限制是按设备算的（「当前设备今日已经签到，请明日再来哦～」）：
+    // 同机第二个账号当天必然拿不到，这是良性结果——记下当天不再重试，也别弹失败红框。
+    if ((err as Partial<import('./api').ApiError>).bizCode === CLAIM_DEVICE_ALREADY_TODAY) {
+      await recordClaimDate(accountKey, day);
+      clearCheckinTimer();
+      log(`${day} 本机今日已签到（服务端按设备限一天一次），账号 ${accountKey} 本次不再重试`);
+      if (manual) {
+        vscode.window.showInformationMessage('TraeCN 本机今日已签到，同一设备每天只能领一次');
+      }
+      return;
+    }
     const message = messageOf(err);
     const remoteDetail = (err as Partial<import('./api').ApiError>).remoteDetail;
     // 接口正文只进输出面板，toast 里只留用户可读的那半句
