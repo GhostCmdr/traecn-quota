@@ -707,7 +707,7 @@ async function refresh(verbose: boolean, preResolved?: TraeAuth): Promise<void> 
     }
     // 积分取到手顺带处理签到：放在成功分支里，登录态不可用时不该多发一次无谓请求。
     // maybeAutoClaim 自带日期守卫，当天签过就是空操作，不会与本函数递归。
-    await maybeAutoClaim();
+    await maybeAutoClaim(auth);
   } catch (err) {
     const api = err as Partial<import('./api').ApiError>;
     let message = messageOf(err);
@@ -798,7 +798,7 @@ export function accountLabel(auth: { username?: string | undefined; userId?: str
   return id ? id.slice(-4) : '';
 }
 
-async function tryClaim(manual: boolean): Promise<void> {
+async function tryClaim(manual: boolean, preResolved?: TraeAuth): Promise<void> {
   if (claiming) {
     // claim 锁与刷新锁是两把：refresh 的 finally 先跑，此时自动 claim 还在飞，手动命令能进来。
     // 这里合并而不是排队——重复弹窗才是打扰，而服务端本就幂等，第二次没有任何收益。
@@ -812,7 +812,7 @@ async function tryClaim(manual: boolean): Promise<void> {
   let tag = '';
   try {
     // 先解析账号再判守卫：守卫按账号分桶，读的哪份登录态就记谁的账。
-    const auth = await resolveAuth();
+    const auth = preResolved ?? (await resolveAuth());
     accountKey = auth.userId || auth.edition;
     const who = accountLabel(auth);
     tag = who ? `（${who}）` : '';
@@ -854,12 +854,13 @@ async function tryClaim(manual: boolean): Promise<void> {
   }
 }
 
-/** 自动路径的唯一入口：只看开关；日期守卫收在 tryClaim 里，避免两处各读一次 globalState */
-async function maybeAutoClaim(): Promise<void> {
+/** 自动路径的唯一入口：只看开关；日期守卫收在 tryClaim 里，避免两处各读一次 globalState。
+ *  刷新链路已经把 auth 解析过了，顺着传下来复用——手动 Token 的解析要读系统钥匙串，别一轮读两次。 */
+async function maybeAutoClaim(preResolved?: TraeAuth): Promise<void> {
   if (!autoCheckinEnabled()) {
     return;
   }
-  await tryClaim(false);
+  await tryClaim(false, preResolved);
 }
 
 function autoCheckinEnabled(): boolean {
