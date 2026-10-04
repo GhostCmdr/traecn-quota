@@ -19,6 +19,8 @@ export interface TraeAuth {
   host: string;
   /** 形状不认识时是 undefined，与「字段缺失」同义，显式允许 */
   expiredAt?: string | undefined;
+  /** Trae 界面显示的用户名（account.username），只用于提示语里区分是哪个账号 */
+  username?: string | undefined;
   /** claim 接口做设备指纹校验，带上客户端真实值才不会被拒 */
   machineId?: string | undefined;
   deviceId?: string | undefined;
@@ -197,16 +199,30 @@ function readFromDir(edition: Edition): TraeAuth {
   }
   const userId = typeof data.userId === 'string' || typeof data.userId === 'number' ? String(data.userId) : '';
   const expiredAt = toInstant(data.expiredAt);
+  const account = data.account && typeof data.account === 'object' ? (data.account as Record<string, unknown>) : {};
 
   return {
     token,
     userId,
+    username: toUsername(account.username),
     host: normalizeApiHost(typeof data.host === 'string' ? data.host : undefined).host,
     expiredAt,
     // 指纹与登录态同文件，读到的就是这份登录态所属客户端写入的设备标识
     ...extractFingerprint(storage),
     edition
   };
+}
+
+/**
+ * 用户名只用来在签到提示里区分账号，形状不对、含零宽/双向控制符或长得不像名字的，一律当没有。
+ * 它来自客户端缓存的服务端数据，不能当成可信文本直接拼进 toast。
+ */
+function toUsername(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const s = value.replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2064]/g, '').trim();
+  return s && s.length <= 64 ? s : undefined;
 }
 
 /** 真机里 expiredAt 是 ISO 字符串；顺手接受数字时间戳，形状不对就当没有，绝不把原始串外发 */

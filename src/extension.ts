@@ -779,6 +779,19 @@ async function recordClaimDate(accountKey: string, day: string): Promise<void> {
  * @param manual 手动命令传 true：被日期守卫挡掉时改为提示「今日已签到」并刷新余额；
  *               自动路径传 false 保持静默，否则每轮刷新都会弹打扰。
  */
+/**
+ * 提示语里区分账号用。优先 Trae 界面那个昵称，超过 5 个字符用 ... 收尾；
+ * 没有昵称（手动 Token）就退回 userId 尾四位，都没有就不带括号。
+ */
+export function accountLabel(auth: { username?: string | undefined; userId?: string | undefined }): string {
+  const name = (auth.username || '').trim();
+  if (name) {
+    return name.length > 5 ? `${name.slice(0, 5)}...` : name;
+  }
+  const id = (auth.userId || '').trim();
+  return id ? id.slice(-4) : '';
+}
+
 async function tryClaim(manual: boolean): Promise<void> {
   if (claiming) {
     // claim 锁与刷新锁是两把：refresh 的 finally 先跑，此时自动 claim 还在飞，手动命令能进来。
@@ -790,10 +803,13 @@ async function tryClaim(manual: boolean): Promise<void> {
   claiming = true;
   let alreadyClaimed = false;
   let accountKey = '';
+  let tag = '';
   try {
     // 先解析账号再判守卫：守卫按账号分桶，读的哪份登录态就记谁的账。
     const auth = await resolveAuth();
     accountKey = auth.userId || auth.edition;
+    const who = accountLabel(auth);
+    tag = who ? `（${who}）` : '';
     if (!shouldClaim(claimDateOf(accountKey), day)) {
       alreadyClaimed = true;
     } else {
@@ -801,7 +817,7 @@ async function tryClaim(manual: boolean): Promise<void> {
       await recordClaimDate(accountKey, day);
       clearCheckinTimer();
       log(`${day} 签到成功（${auth.edition}）`);
-      vscode.window.showInformationMessage('TraeCN 签到成功');
+      vscode.window.showInformationMessage(`TraeCN 签到成功${tag}`);
       // 不在这里再调 refresh()：那会经 maybeAutoClaim 回到 tryClaim 形成回环。
       // 自动路径的积分刷新本来就在同一轮 refresh 里已经取过；手动命令则交给下一次定时刷新反映新余额。
     }
@@ -812,9 +828,7 @@ async function tryClaim(manual: boolean): Promise<void> {
       await recordClaimDate(accountKey, day);
       clearCheckinTimer();
       log(`${day} 本机今日已签到（服务端按设备限一天一次），账号 ${accountKey} 本次不再重试`);
-      if (manual) {
-        vscode.window.showInformationMessage('TraeCN 本机今日已签到，同一设备每天只能领一次');
-      }
+      vscode.window.showInformationMessage(`当前设备已签到，请更换设备${tag}`);
       return;
     }
     const message = messageOf(err);
@@ -829,7 +843,7 @@ async function tryClaim(manual: boolean): Promise<void> {
   // 被守卫挡掉的手动命令：提示 + 刷一次余额。放在锁外，refresh 内部的自动 claim 才不会撞锁，
   // 它本身的失败也不该被上面那个 catch 说成「签到失败」。
   if (alreadyClaimed && manual) {
-    vscode.window.showInformationMessage('TraeCN 今日已签到，无需重复领取');
+    vscode.window.showInformationMessage(`TraeCN 今日已签到，无需重复领取${tag}`);
     await refresh(true);
   }
 }
