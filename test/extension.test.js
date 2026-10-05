@@ -1586,7 +1586,7 @@ test('accountLabel：昵称超 5 字符用 ... 收尾，无昵称退回 userId �
   assert.strictEqual(accountLabel({ username: '用户1234567890', userId: '100000000000001' }), '用户123...');
   assert.strictEqual(accountLabel({ username: '用户abc', userId: '1' }), '用户abc', '正好 5 个字符不截');
   assert.strictEqual(accountLabel({ username: '用户abcd', userId: '1' }), '用户abc...', '第 6 个字符起被省略号顶掉');
-  assert.strictEqual(accountLabel({ username: '', userId: '2000000000004321' }), '9545');
+  assert.strictEqual(accountLabel({ username: '', userId: '2000000000004321' }), '4321');
   assert.strictEqual(accountLabel({ username: '  ', userId: '' }), '', '两个都没有就不加括号');
   globalThis.fetch = undefined;
 });

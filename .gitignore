@@ -20,4 +20,7 @@ build/
 .arts/
 .codeartsdoer/
 .codegraph/
+# 技能工具的工作目录（内含任务简报与审查报告）。它自带一层 .gitignore 兜着，
+# 但那层是工具生成的，靠它不如在这里再钉一行，免得 `git add -A` 把内部材料带进公开仓库。
+.superpowers/
 
