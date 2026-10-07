@@ -8,8 +8,9 @@ preview/theme-check.html
 preview/_*.png
 preview/_*.html
 
-# 内部实施计划只留在本机：会被 git add -A 顺带提交，而仓库是公开的
-documents/plans/
+# 设计稿与内部约定只留本机（全部并进 AGENTS.md）：仓库是公开的，`git add -A` 又不能替你判断
+documents/
+AGENTS.md
 
 # 编辑器与系统噪音
 .DS_Store

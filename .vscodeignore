@@ -4,6 +4,7 @@ scripts/**
 preview/**
 test/**
 documents/**
+AGENTS.md
 node_modules/**
 **/*.map
 **/*.ts
