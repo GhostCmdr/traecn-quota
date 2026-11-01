@@ -37,7 +37,7 @@ jobs:
       notes_versions: ${{ steps.decide.outputs.notes_versions }}
       publish_label: ${{ steps.decide.outputs.publish_label }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - id: decide
         env:
@@ -178,7 +178,7 @@ jobs:
     if: needs.gate.outputs.notes_versions != ''
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 更新 Release 正文
         env:
@@ -201,9 +201,9 @@ jobs:
     if: needs.gate.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           # 与本地开发一致。测试脚本里的 "test/**/*.test.js" 由 Node 自己展开，
           # glob 支持要 Node 21+，用 20 会当成模块路径去找 → 整步直接报错
