@@ -1,0 +1,284 @@
+name: changelog
+
+# 列表粗体标题固定写成动作名；副标题由 GitHub 自动拼成「changelog #N: …」
+run-name: 更新说明与发布
+
+# CHANGELOG 有改动才启动：判断是「只更新 Release 说明」还是「发布新版本」。
+# 手动运行并勾 force_publish 用于补发当前版本（已存在的市场步骤会自动跳过）。
+on:
+  push:
+    branches: [main]
+    paths: ['CHANGELOG.md']
+  workflow_dispatch:
+    inputs:
+      force_publish:
+        description: '按当前 package.json 版本重新发布（补发失败的市场步骤）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  id-token: write
+
+# 连续两次推送时排队执行，避免同时判定「tag 不存在」而重复建 tag
+concurrency:
+  group: changelog-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # 判定这一轮该做什么：
+  #  - 顶部版本没有 tag → 发布新版本
+  #  - 顶部版本已发过 → 只比对说明，不一致时更新（覆盖最新两个版本）
+  gate:
+    name: 判定该做什么
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.decide.outputs.publish }}
+      notes_versions: ${{ steps.decide.outputs.notes_versions }}
+      publish_label: ${{ steps.decide.outputs.publish_label }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_PUBLISH: ${{ inputs.force_publish }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t versions < <(grep -E '^## [0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$' CHANGELOG.md | sed -E 's/^##[[:space:]]+//;s/[[:space:]]+$//' | head -2)
+          if [ "${#versions[@]}" -eq 0 ]; then
+            echo "CHANGELOG 里找不到 x.y.z 形式的版本标题" >&2
+            exit 1
+          fi
+          top="${versions[0]}"
+
+          norm() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(s.replace(/^\s+|\s+$/g,"")))'; }
+
+          publish=false
+          republish=false
+          notes_versions=""
+          for v in "${versions[@]}"; do
+            tag_exists=false
+            if git ls-remote --exit-code --tags origin "refs/tags/v$v" >/dev/null 2>&1; then
+              tag_exists=true
+            fi
+
+            # 没有 tag：只有顶部版本才允许发布，旧版本缺失就跳过
+            if [ "$tag_exists" = "false" ]; then
+              if [ "$v" = "$top" ]; then
+                pkg="$(node -p "require('./package.json').version")"
+                lock="$(node -p "require('./package-lock.json').version")"
+                lockpkg="$(node -p "require('./package-lock.json').packages[''].version || ''")"
+                [ "$pkg" = "$v" ] || { echo "package.json 是 $pkg，CHANGELOG 是 $v，未对齐，拒绝发布。" >&2; exit 1; }
+                [ "$lock" = "$v" ] || { echo "package-lock.json 顶层是 $lock，应为 $v。" >&2; exit 1; }
+                [ "$lockpkg" = "$v" ] || { echo "package-lock.json packages[\"\"] 是 $lockpkg，应为 $v。" >&2; exit 1; }
+                publish=true
+              fi
+              continue
+            fi
+
+            # tag 有、Release 没有：顶部版本补建，旧版本不动
+            current="$(gh release view "v$v" --json body -q .body 2>/dev/null || true)"
+            if [ -z "$current" ]; then
+              if [ "$v" = "$top" ]; then
+                publish=true
+                republish=true
+              fi
+              continue
+            fi
+
+            # tag 与 Release 都在：比对说明，忽略首尾空白
+            desired="$(awk -v h="## $v" 'index($0,h)==1{c=1;next} c&&/^## /{c=0} c' CHANGELOG.md)"
+            if [ "$(printf '%s' "$current" | norm)" != "$(printf '%s' "$desired" | norm)" ]; then
+              notes_versions="$notes_versions $v"
+            fi
+          done
+          notes_versions="${notes_versions# }"
+
+          if [ "$FORCE_PUBLISH" = "true" ]; then
+            # 补发也要求 CHANGELOG 顶部与 package.json / lockfile 对齐，
+            # 否则会出现「任务名写 0.1.5、实际发布 0.1.4」的错位
+            pkg="$(node -p "require('./package.json').version")"
+            lock="$(node -p "require('./package-lock.json').version")"
+            lockpkg="$(node -p "require('./package-lock.json').packages[''].version || ''")"
+            [ "$pkg" = "$top" ] || { echo "强制发布要求 CHANGELOG 顶部（$top）与 package.json（$pkg）一致。" >&2; exit 1; }
+            [ "$lock" = "$top" ] || { echo "package-lock.json 顶层是 $lock，应为 $top。" >&2; exit 1; }
+            [ "$lockpkg" = "$top" ] || { echo "package-lock.json packages[\"\"] 是 $lockpkg，应为 $top。" >&2; exit 1; }
+            publish=true
+            republish=true
+          fi
+
+          # 重新发布时，顶部版本的正文由发布步骤一起写，不必再进「同步说明」清单
+          if [ "$republish" = "true" ] && [ -n "$notes_versions" ]; then
+            kept=""
+            for n in $notes_versions; do
+              [ "$n" = "$top" ] || kept="$kept $n"
+            done
+            notes_versions="${kept# }"
+          fi
+
+          # 任务名：只在需要发布时用得上
+          verb="发布"
+          [ "$republish" = "true" ] && verb="重新发布"
+          if [ "$publish" = "true" ] && [ -n "$notes_versions" ]; then
+            label="$verb $top 到市场，并更新 $notes_versions 的说明"
+          elif [ "$publish" = "true" ]; then
+            label="$verb $top 到市场"
+          elif [ -n "$notes_versions" ]; then
+            label="同步 Release 说明：$notes_versions"
+          else
+            label="无需操作"
+          fi
+
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "notes_versions=$notes_versions" >> "$GITHUB_OUTPUT"
+          echo "publish_label=$label" >> "$GITHUB_OUTPUT"
+
+          # 运行摘要：每种情况一个独立小节，小节之间空一行
+          first_block=1
+
+          if [ "$publish" = "true" ]; then
+            if [ "$republish" = "true" ]; then
+              change="重新发布 $top 版本"
+            else
+              change="新增 $top 版本"
+            fi
+            if [ "$first_block" = "1" ]; then first_block=0; else echo "" >> "$GITHUB_STEP_SUMMARY"; fi
+            echo "## CHANGELOG.md变动" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 变动情况：$change" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 执行命令：发布新版本" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 上架版本：$top" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 上架市场：微软市场、Open VSX" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ -n "$notes_versions" ]; then
+            if [ "$first_block" = "1" ]; then first_block=0; else echo "" >> "$GITHUB_STEP_SUMMARY"; fi
+            echo "## CHANGELOG.md变动" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 变动情况：修改 $notes_versions Release Notes" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 执行命令：更新 Release Notes" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 更新版本：$notes_versions" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 更新说明：$notes_versions Release Notes" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [ "$publish" = "false" ] && [ -z "$notes_versions" ]; then
+            if [ "$first_block" = "1" ]; then first_block=0; else echo "" >> "$GITHUB_STEP_SUMMARY"; fi
+            echo "## CHANGELOG.md变动" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 变动情况：无实质变化" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 执行命令：无" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # 只同步说明：不动 tag、不重打包、不发市场
+  notes:
+    name: 同步 Release 说明：${{ needs.gate.outputs.notes_versions }}
+    needs: gate
+    if: needs.gate.outputs.notes_versions != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 更新 Release 正文
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSIONS: ${{ needs.gate.outputs.notes_versions }}
+        run: |
+          set -euo pipefail
+          for v in $VERSIONS; do
+            tag="v$v"
+            notes="$(awk -v h="## $v" 'index($0,h)==1{c=1;next} c&&/^## /{c=0} c' CHANGELOG.md)"
+            [ -n "$notes" ] || notes="本版无功能变更。"
+            gh release edit "$tag" --title "$tag" --notes "$notes"
+            echo "已更新 $tag 的 Release 说明"
+          done
+
+  # 发布：单测 → 打包 → 建 tag/Release → 挂附件 → 发两个市场
+  publish:
+    name: ${{ needs.gate.outputs.publish_label }}
+    needs: gate
+    if: needs.gate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 与本地开发一致。测试脚本里的 "test/**/*.test.js" 由 Node 自己展开，
+          # glob 支持要 Node 21+，用 20 会当成模块路径去找 → 整步直接报错
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: 校验版本一致
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          lock="$(node -p "require('./package-lock.json').version")"
+          if [ "$lock" != "$version" ]; then
+            echo "package-lock.json 顶层是 $lock，package.json 是 $version。本地跑一次 npm install 对齐后再提交。" >&2
+            exit 1
+          fi
+          # npm 11 会同时维护 packages[""].version，两个字段失配同样会漏
+          lockpkg="$(node -p "require('./package-lock.json').packages[''].version || ''")"
+          if [ "$lockpkg" != "$version" ]; then
+            echo "package-lock.json packages[\"\"] 是 $lockpkg，package.json 是 $version。" >&2
+            exit 1
+          fi
+
+      - name: 单元测试
+        # 布局/像素校验（preview/measure-*.js）断言的是 Segoe UI + Microsoft YaHei
+        # 下的墨迹间距，CI 机器没这两款字体，量出来必然不同——那是本机设计常量的
+        # 回归门，留在提交前本地跑 npm test。test:unit 会先自动编译出 out/。
+        run: npm run test:unit
+
+      - name: 打包
+        run: npx --yes @vscode/vsce package --no-dependencies
+
+      - name: 建 tag 与 Release，并挂上 vsix
+        # 放在发市场之前：国产 IDE（Qoder CN / Trae CN / CodeArts / CodeBuddy）的扩展面板
+        # 走各自的市场源，未必搜得到微软 Marketplace，这个 .vsix 附件就是给那部分用户的
+        # 兜底下载口，不该被后面市场的发布失败连带跳过。
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          tag="v${version}"
+          notes="$(awk -v h="## ${version}" 'index($0,h)==1{c=1;next} c&&/^## /{c=0} c' CHANGELOG.md)"
+          [ -n "$notes" ] || notes="本版无功能变更。"
+          # 第一次发布：gh 会在 $GITHUB_SHA 上顺带创建 tag；补发：只更新正文
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "$tag" --notes "$notes"
+          else
+            gh release create "$tag" --target "$GITHUB_SHA" --title "$tag" --notes "$notes"
+          fi
+          gh release upload "$tag" ./*.vsix --clobber
+
+      - name: 发布到微软市场
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          id="$(node -p "const p=require('./package.json');p.publisher+'.'+p.name")"
+          published="$(npx --yes @vscode/vsce show "$id" --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s.slice(s.indexOf("{"))).versions[0].version)}catch{console.log("")}})')"
+          if [ "$published" = "$version" ]; then
+            echo "v$version 已在微软市场上，跳过发布。"
+            exit 0
+          fi
+          npx --yes @vscode/vsce publish --no-dependencies --pat "$VSCE_PAT"
+
+      - name: 发布到 Open VSX
+        run: |
+          vsix="$(ls ./*.vsix | head -n1)"
+          version="$(node -p "require('./package.json').version")"
+          ns="$(node -p "require('./package.json').publisher")"
+          name="$(node -p "require('./package.json').name")"
+          # 版本已存在时先查再决定，跳过即可。不用 `|| echo` 兜底：那会把发布失败伪装成绿灯。
+          if curl -sf -o /dev/null "https://open-vsx.org/api/$ns/$name/$version"; then
+            echo "v$version 已在 Open VSX 上，跳过发布。"
+            exit 0
+          fi
+          # 受信发布：用 id-token: write 拿到的 OIDC 身份令牌换短期凭证，不传任何长期令牌。
+          # 对应 open-vsx.org 上为本仓库登记、Workflow 填 changelog.yml 的受信发布者。
+          npx --yes ovsx publish "$vsix" --trusted-publishing

@@ -1,0 +1,46 @@
+name: push
+
+# 每次推送到 main 都留一条记录，证明这次提交进了云端仓库。
+# 不编译、不测试、不判断 CHANGELOG、不发布。
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  record:
+    name: 记录本次推送
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 打印提交信息
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse --short HEAD)"
+          subject="$(git log -1 --pretty=%s)"
+          # 用 GitHub 账号名，不打印本机 git 配置的作者名：运行摘要公开可见
+          author="${GITHUB_ACTOR}"
+          time="$(git log -1 --date=format:'%Y-%m-%d %H:%M' --pretty=%ad)"
+          files="$(git show --stat --oneline --format='' HEAD)"
+
+          echo "提交：$sha"
+          echo "说明：$subject"
+          echo "作者：$author"
+          echo "时间：$time"
+          git show --stat --oneline --format='' HEAD
+
+          {
+            echo "## 本次推送"
+            echo
+            echo "- 提交：\`$sha\`"
+            echo "- 说明：$subject"
+            echo "- 作者：$author"
+            echo "- 时间：$time"
+            echo "- 改动文件："
+            echo '```'
+            printf '%s\n' "$files"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
