@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
 import { loadAuth, loadAuthFromToken, normalizeApiHost, TraeAuth, editionLabel } from './auth';
-import { CreditPack, CreditsSummary, fetchCheckinStatus, fetchCredits, claimCheckin } from './api';
+import { CreditsSummary, fetchCheckinStatus, fetchCredits, claimCheckin } from './api';
 import { shouldClaim, todayString } from './checkin';
+import { buildPanelData, buildTooltipMarkdown, footerHostPad } from './tooltip';
+import { fmtCredits, pctOf } from './format';
 
 let statusBar: vscode.StatusBarItem;
 let output: vscode.OutputChannel;
@@ -12,6 +14,8 @@ let refreshTimer: NodeJS.Timeout | undefined;
 
 /** 最近一次成功取到的数据，供主题切换 / 纯显示项变更时免网络重绘 */
 let lastSummary: CreditsSummary | undefined;
+/** 标题行账号徽标的名字：刷新成功时从登录态取，换账号后随下次刷新更新 */
+let lastAccountName = '';
 /** 同一时刻只允许一次刷新，避免连点或定时器叠加请求 */
 let refreshing = false;
 /** 锁被占着时又来了必须刷新的变更（换凭证等），锁释放后补一轮，绝不无声丢弃 */
@@ -45,7 +49,7 @@ const MAX_REFRESH_MINUTES = 1440;
 /** 自动签到的默认开关，与 package.json 里 traecnquota.autoCheckin 的 default 保持一致（导出供测试锚定两处同源） */
 export const DEFAULT_AUTO_CHECKIN = true;
 /** 改了必须重新取数的设置项；不在此列的（detailRows、autoCheckin）只需按上一次数据重绘或不影响渲染 */
-const REFRESH_KEYS = ['edition', 'hostOverride', 'manualToken', 'refreshInterval'];
+const REFRESH_KEYS = ['hostOverride', 'manualToken', 'refreshInterval'];
 /** 既不参与渲染也不参与取数的设置项：拨动它只改变后续刷新的决策，本身不该触发任何请求 */
 const NO_EFFECT_KEYS = ['autoCheckin'];
 
@@ -74,62 +78,6 @@ function messageOf(err: unknown): string {
   return raw.trim() ? raw : '未知错误';
 }
 
-function fmtInt(value: number): string {
-  return Math.round(value).toLocaleString('en-US');
-}
-
-/**
- * 额度显示。积分可以到 6~7 位，而明细行额度列只有约 63px 的字面预算（再宽就往名称列上压），
- * 所以 1 万以上改用 w（万）、1 亿以上改用「亿」，保留 1 位小数并去掉多余的 .0。
- * 实测（无头 Chrome 像素扫描，字号 11）：9,999 / 10,000 = 69px，1.5w / 2w = 47px。
- */
-export function fmtCredits(value: number): string {
-  const n = Math.round(value);
-  if (!Number.isFinite(n)) {
-    return '-';
-  }
-  if (n < 10000) {
-    return fmtInt(n);
-  }
-  const scale = n < 1e8 ? { div: 1e4, unit: 'w' } : { div: 1e8, unit: '亿' };
-  const scaled = n / scale.div;
-  return fmtDecimal(scaled, scaled >= 1000 ? 0 : 1) + scale.unit;
-}
-
-/** 定点小数 + 千分位整数部分；小数尾部的 0 去掉（100.0 → 100） */
-function fmtDecimal(scaled: number, digits: number): string {
-  const fixed = scaled.toFixed(digits);
-  const dot = fixed.indexOf('.');
-  const intPart = dot < 0 ? fixed : fixed.slice(0, dot);
-  const fracPart = dot < 0 ? '' : fixed.slice(dot + 1).replace(/0+$/, '');
-  const grouped = Number(intPart).toLocaleString('en-US');
-  return fracPart ? `${grouped}.${fracPart}` : grouped;
-}
-
-/** 剩余占比。状态栏文字与悬浮窗必须同一个口径，否则数据异常时会一个封顶一个不封顶 */
-function pctOf(summary: CreditsSummary): number {
-  if (summary.unlimited) {
-    return 100;
-  }
-  if (summary.limit <= 0) {
-    return 0;
-  }
-  return Math.min(100, Math.max(0, Math.round((summary.remaining / summary.limit) * 100)));
-}
-
-function fmtQuota(value: number, unlimited: boolean): string {
-  return unlimited ? '不限量' : fmtCredits(value);
-}
-
-/** 到期时间只到分钟：秒对用户没用，还占明细末列的宽度预算 */
-function fmtTime(seconds?: number): string {
-  if (!seconds) {
-    return '-';
-  }
-  const d = new Date(seconds * 1000);
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-}
-
 /** 两位补零；到期时间与页脚的更新时间共用 */
 function pad2(n: number): string {
   return String(n).padStart(2, '0');
@@ -142,15 +90,6 @@ function timesUp(expiredAt?: string): boolean {
   return Date.now() > new Date(expiredAt).getTime();
 }
 
-/** 转义 HTML，防止套餐名破坏 SVG/HTML 结构 */
-function escHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
 
 /**
  * 设置项只是输入口：一旦读到非空值就搬进 VSCode 的加密保管箱并清空本项，
@@ -271,7 +210,7 @@ async function resolveAuth(): Promise<TraeAuth> {
     auth = loadAuthFromToken(manual);
   } else {
     try {
-      auth = loadAuth(cfg().get<string>('edition') || 'auto');
+      auth = loadAuth('auto');
     } catch (err) {
       // 取不到登录态就直说，不再拿必定 401 的明文 JWT 去兜底
       const why = (err as Error).message;
@@ -293,6 +232,37 @@ async function resolveAuth(): Promise<TraeAuth> {
   return auth;
 }
 
+/**
+ * 旧版本暴露过 traecnquota.edition；新版固定 auto。
+ * 启动时清掉 settings.json 里的残留值，避免 VS Code 报「未知配置」。
+ */
+async function removeLegacyEditionSetting(): Promise<void> {
+  const scope = cfg().inspect<unknown>('edition');
+  if (!scope) {
+    return;
+  }
+  let removed = false;
+  const targets: Array<[unknown, vscode.ConfigurationTarget]> = [
+    [scope.workspaceFolderValue, vscode.ConfigurationTarget.WorkspaceFolder],
+    [scope.workspaceValue, vscode.ConfigurationTarget.Workspace],
+    [scope.globalValue, vscode.ConfigurationTarget.Global]
+  ];
+  for (const [value, target] of targets) {
+    if (value === undefined) {
+      continue;
+    }
+    try {
+      await cfg().update('edition', undefined, target);
+      removed = true;
+    } catch (err) {
+      log(`移除旧的 edition 设置失败（${messageOf(err)}），可手动删除 settings.json 里的 traecnquota.edition`);
+    }
+  }
+  if (removed) {
+    log('已移除旧的 edition 设置');
+  }
+}
+
 /** 明细行数：未配置回落到默认值，可配 1~6，手改成非数字也回落到默认而不是空表 */
 function detailRows(): number {
   // 用 unknown 接收：settings.json 是用户手可改的，类型不受 schema 约束
@@ -307,360 +277,75 @@ function detailRows(): number {
   return Math.min(Math.max(Math.trunc(n), 1), 6);
 }
 
-/** 终端显示宽度：CJK 全角字符按 2 格计，用于 SVG 内名称截断 */
-function displayWidth(s: string): number {
-  let w = 0;
-  for (const ch of s) {
-    const c = ch.codePointAt(0) ?? 0;
-    w +=
-      (c >= 0x1100 && c <= 0x115f) ||
-      (c >= 0x2e80 && c <= 0xa4cf) ||
-      (c >= 0xac00 && c <= 0xd7a3) ||
-      (c >= 0xf900 && c <= 0xfaff) ||
-      (c >= 0xfe30 && c <= 0xfe6f) ||
-      (c >= 0xff00 && c <= 0xff60) ||
-      (c >= 0xffe0 && c <= 0xffe6) ||
-      c >= 0x1f300
-        ? 2
-        : 1;
-  }
-  return w;
-}
-
-/** 按显示宽度截断长名称，超出部分以 … 结尾 */
-function truncate(s: string, width: number): string {
-  if (displayWidth(s) <= width) {
-    return s;
-  }
-  let out = '';
-  for (const ch of s) {
-    if (displayWidth(out + ch) > width - 1) {
-      break;
-    }
-    out += ch;
-  }
-  return out + '…';
-}
-
-/** 明细行两列的字面间距与额度列右锚点，与 buildTooltipBody 里的 X_QUOTA/GAP 同一套实测常数 */
-const QUOTA_RIGHT = 145.6;
-const COL_GAP_PX = 20;
-/** 1 个显示格（半个汉字）在 11px 字号下的推进宽度 */
-const CELL_PX = 5.5;
-/**
- * 省略号实测 8.5px，而 displayWidth 只算它 1 格（5.5px），截断出来的名称会比格数估算宽 3px。
- * 不给这点余量的话，满截断名称与额度列之间实测只剩 19.1px（无头 Chrome getBBox 实测）。
- */
-const ELLIPSIS_EXTRA_PX = 3;
-const NAME_CELLS_MAX = 11;
-const NAME_CELLS_MIN = 6;
-
-/** 11px 字号下各字形的推进宽度，无头 Chrome 像素扫描实测（整串误差 <1px） */
-function glyphPx(ch: string): number {
-  const c = ch.codePointAt(0) ?? 0;
-  if (c >= 0x2e80) {
-    return 11; // 汉字与全角标点
-  }
-  if (ch === ' ') {
-    return 2.8;
-  }
-  if (ch === ',' || ch === '.') {
-    return 3.1;
-  }
-  if (ch === '/') {
-    return 3.4;
-  }
-  if (ch === 'w') {
-    return 7.9;
-  }
-  if (ch === '…') {
-    return 8.5;
-  }
-  return 6.1; // 数字
-}
-
-export function textPx(s: string): number {
-  let px = 0;
-  for (const ch of s) {
-    px += glyphPx(ch);
-  }
-  return px;
-}
 
 /**
- * 名称列可用格数：额度串越宽，名称列越短，两列之间 20px 的字面间距必须恒成立。
- * 现有数据（额度最宽 2,000 / 2,000、名称 5 个汉字）算出来仍容得下原样名称，所以定稿视觉不变。
+ * 签到状态归一成面板认识的四个码：跨天后旧值作废，回落「签到未查询」。
  */
-export function nameCells(quotaText: string): number {
-  const room = QUOTA_RIGHT - COL_GAP_PX - textPx(quotaText) - ELLIPSIS_EXTRA_PX;
-  return Math.min(NAME_CELLS_MAX, Math.max(NAME_CELLS_MIN, Math.floor(room / CELL_PX)));
-}
-
-export function svgDataUri(svg: string): string {
-  return 'data:image/svg+xml;base64,' + Buffer.from(svg).toString('base64');
-}
-
-/**
- * 悬浮窗 SVG 配色。SVG 内不能引用 VSCode 的 CSS 变量，
- * 因此按当前颜色主题（浅色 / 深色）手动选色，避免浅色主题下白字白底不可读。
- */
-interface Palette {
-  strong: string;
-  body: string;
-  muted: string;
-  track: string;
-  divider: string;
-  rowLine: string;
-  accent: string;
-  pill: string;
-  accentLow: string;
-  pillLow: string;
-}
-
-export function paletteFor(kind: vscode.ColorThemeKind): Palette {
-  if (kind === vscode.ColorThemeKind.Light) {
-    return {
-      strong: '#1f2328',
-      body: '#24292f',
-      muted: '#57606a',
-      track: '#d0d7de',
-      divider: 'rgba(31,35,40,0.28)',
-      rowLine: 'rgba(31,35,40,0.16)',
-      accent: '#0969da',
-      pill: '#0550ae',
-      accentLow: '#cf222e',
-      pillLow: '#a5111b'
-    };
+function checkinCode(): 'claimed' | 'unclaimed' | 'disabled' | 'unknown' {
+  const today = new Date().toLocaleDateString('sv');
+  if (!checkinStateText || checkinStateDay !== today) {
+    return 'unknown';
   }
-  return {
-    strong: '#ffffff',
-    body: '#e6e6e6',
-    muted: '#9a9ea6',
-    track: '#3f3f46',
-    divider: 'rgba(128,128,128,0.25)',
-    rowLine: 'rgba(128,128,128,0.18)',
-    accent: '#2196f3',
-    pill: '#1976d2',
-    accentLow: '#f48771',
-    pillLow: '#d9534f'
-  };
-}
-
-/** 图标只有明暗两套配色，base64 结果按颜色缓存，避免每次 render 重拼 */
-const iconCache = new Map<string, string>();
-function cachedIcon(key: string, build: () => string): string {
-  let uri = iconCache.get(key);
-  if (!uri) {
-    uri = build();
-    iconCache.set(key, uri);
+  if (checkinStateText.startsWith('今日已签到')) {
+    return 'claimed';
   }
-  return uri;
-}
-
-/** 标题栏右侧可点击图标：用量明细（四根等长横线） */
-export function usageIconUri(color: string): string {
-  return cachedIcon('u' + color, () =>
-    svgDataUri(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><g fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round"><path d="M2.8 3.2h10.4"/><path d="M2.8 6.4h10.4"/><path d="M2.8 9.6h10.4"/><path d="M2.8 12.8h10.4"/></g></svg>`
-    )
-  );
-}
-
-/**
- * 用量明细的跳转目标。Trae 系顶栏那个「点击查看积分用量明细」按钮走
- * workbench.action.icubeOpenUsageDetails（命令 id 从本机 Trae 的 workbench 包里核出），
- * 其他宿主没这条命令，点了会报错，所以回落到网页端用量页。
- */
-export function usageTargetHref(appName: string | undefined): string {
-  return /trae/i.test(appName ?? '')
-    ? 'command:workbench.action.icubeOpenUsageDetails'
-    : 'https://www.trae.cn/dashboard#usage';
-}
-
-/** 标题栏右侧可点击图标：刷新（双向弧 sync） */
-export function refreshIconUri(color: string): string {
-  return cachedIcon('r' + color, () =>
-    svgDataUri(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><g fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.2 6.8a5.2 5.2 0 0 1 8.9-2.4M12.8 9.2a5.2 5.2 0 0 1-8.9 2.4"/><path d="M12.9 1.6v3.2H9.7"/><path d="M3.1 14.4v-3.2h3.2"/></g></svg>`
-    )
-  );
-}
-
-/** 标题栏右侧可点击图标：齿轮（外齿+镂空圆环） */
-export function gearIconUri(color: string): string {
-  return cachedIcon('g' + color, () =>
-    svgDataUri(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><g fill="${color}">${[0, 45, 90, 135, 180, 225, 270, 315]
-        .map(a => `<rect x="7" y="0.9" width="2" height="2.7" rx="0.7" transform="rotate(${a} 8 8)"/>`)
-        .join('')}</g><circle cx="8" cy="8" r="3.4" fill="none" stroke="${color}" stroke-width="2.6"/></svg>`
-    )
-  );
-}
-
-/**
- * 悬浮窗数据体 SVG（透明背景）：大数字+分母 / 百分比胶囊 / 进度条 /
- * 明细三列表（表头下 + 每行下均有分隔线）/ 签到页脚。
- */
-/**
- * 页脚底距的宿主补偿：从 STEP 里扣掉多少，剩多少留在 SVG 内。
- * 行内图下方宿主额外补的空间两家不同，2026-10-03 用 preview/measure-host-gap.js
- * 对两家真机截图逐行反推（缩放由 SVG 内部刻度自校准；截图边缘 ±1px 折 ±0.85 单位）：
- * VS Code 补 7.9 单位 ⇒ 契约值 8.6，Trae 系补 3.4 单位 ⇒ 契约值 4.1。
- * 推导：页脚墨迹底到 SVG 底自带 10.7，B = 10.7 - hostPad + 宿主补，设计契约 B = A = 10。
- * VS Code 取整为 9（实测 B/A=0.92，也是 preview/measure-pixels.js 布局回归锁住的那套），
- * Trae 取整为 4（扣 5 会让 B/A 掉到 0.87）。
- * 识别用 appName 含 "trae"；若 Trae 改名会静默退回 VS Code 取值，不会报错。
- * 调用方用可选链传 appName：preview 主题检查脚本的极简 vscode 桩没有 env。
- */
-export function footerHostPad(appName: string | undefined): number {
-  return /trae/i.test(appName ?? '') ? 4 : 9;
-}
-
-export function buildTooltipBody(
-  packs: CreditPack[],
-  summary: CreditsSummary,
-  pal: Palette,
-  maxRows = DEFAULT_DETAIL_ROWS,
-  fetchedAt = Date.now()
-): string {
-  const W = 251.7;
-  const RIGHT = W;
-  // 额度列右缘：名称列满截断字形宽 62 + 间距 20 + 额度列最宽 62.6，且到期列(86.9)左缘留出 20 间距
-  const X_QUOTA = QUOTA_RIGHT;
-  const shown = packs.slice(0, maxRows);
-
-  // 纵向：相邻元素的**墨迹**之间留 GAP 行空白。墨迹延伸 = 截图逐行扫描实测（preview/measure-pixels.js），
-  // 不是字体盒。像素行是闭区间，所以 10 行空白 = 下一元素 = 上一元素墨迹底行 + 11。
-  const GAP = 10;
-  const STEP = GAP + 1;
-  const HEAD_LINE_GAP = 5 + 1; // 表头「明细」二字墨迹底 → 表头分隔线，比其他间距收紧一半
-  const BAR_ROWS = 5;
-  const LINE_ROWS = 1;
-  const NUM_ASC = 22; // 30px 数字：基线上 22 行有墨迹
-  const NUM_DESC = 3; // 700 字重下逗号多占 1 行
-  const TXT_ASC = 9; // 10~11px 中英混排：基线上 9 行，下 1 行
-  const TXT_DESC = 1;
-
-  // 标题墨迹底到 SVG 顶有 10.7px 固定余量，再往下垫 4 行 → 标题到数字实测间距 15
-  const NUM_TOP_PAD = 4;
-  const numBase = NUM_TOP_PAD + NUM_ASC;
-  const numBot = numBase + NUM_DESC;
-  const barTop = numBot + STEP;
-  const headBase = barTop + BAR_ROWS + STEP + TXT_ASC;
-  const headLineTop = headBase + TXT_DESC + HEAD_LINE_GAP;
-  const rowBase = headLineTop + LINE_ROWS + STEP + TXT_ASC;
-  const rowPitch = TXT_DESC + STEP + STEP + TXT_ASC;
-  const lastRowBot = rowBase + Math.max(shown.length - 1, 0) * rowPitch + TXT_DESC;
-  const footBase = lastRowBot + STEP * 2 + TXT_ASC;
-  // 宿主在行内图下方补得少就扣得少，取值见 footerHostPad 注释里的双宿主实测
-  const hostPad = footerHostPad(vscode.env?.appName);
-  const H = footBase + TXT_DESC + STEP - hostPad;
-
-  const pct = pctOf(summary);
-  const low = !summary.unlimited && pct <= 20;
-  const accent = low ? pal.accentLow : pal.accent;
-  const pillFill = low ? pal.pillLow : pal.pill;
-
-  const parts: string[] = [];
-
-  // 主数值 + 分母（数字更大更粗，分母小字贴基线）
-  const big = summary.unlimited ? '∞' : fmtCredits(summary.remaining);
-  const sub = summary.unlimited ? ' 不限量' : ` / ${fmtCredits(summary.limit)}`;
-  parts.push(
-    `<text x="0" y="${numBase}" fill="${pal.strong}" font-size="30" font-weight="700">${big}<tspan fill="${pal.muted}" font-size="13" font-weight="400">${escHtml(sub)}</tspan></text>`
-  );
-  // 百分比胶囊（右上，实心蓝底白字，与数字墨迹顶部对齐）
-  const pillW = 44;
-  const pillH = 22;
-  const pillX = RIGHT - pillW;
-  const pillY = NUM_TOP_PAD + (NUM_ASC + NUM_DESC - pillH) / 2;
-  parts.push(`<rect x="${pillX}" y="${pillY}" width="${pillW}" height="${pillH}" rx="11" fill="${pillFill}"/>`);
-  parts.push(
-    `<text x="${pillX + pillW / 2}" y="${pillY + pillH / 2 + 1}" fill="#ffffff" font-size="11" font-weight="700" text-anchor="middle" dominant-baseline="middle">${summary.unlimited ? '∞' : pct + '%'}</text>`
-  );
-
-  // 进度条
-  parts.push(`<rect x="0" y="${barTop}" width="${W}" height="${BAR_ROWS}" rx="2.5" fill="${pal.track}"/>`);
-  parts.push(
-    `<rect x="0" y="${barTop}" width="${Math.max(BAR_ROWS, (W * pct) / 100).toFixed(1)}" height="${BAR_ROWS}" rx="2.5" fill="${accent}"/>`
-  );
-
-  // 表头（上方一条线，下方一条线）
-  parts.push(`<text x="0" y="${headBase}" fill="${pal.muted}" font-size="10">明细</text>`);
-  parts.push(`<text x="${X_QUOTA}" y="${headBase}" fill="${pal.muted}" font-size="10" text-anchor="end">额度</text>`);
-  parts.push(`<text x="${RIGHT}" y="${headBase}" fill="${pal.muted}" font-size="10" text-anchor="end">到期</text>`);
-  parts.push(`<line x1="0" y1="${headLineTop + LINE_ROWS / 2}" x2="${W}" y2="${headLineTop + LINE_ROWS / 2}" stroke="${pal.divider}" stroke-width="1"/>`);
-
-  // 明细行：每行文字下方一条分隔线
-  // 名称列格数按**本次展示的最宽额度串**统一算：逐行各算各的会让同一列截断得长短不齐
-  const widestQuota = shown
-    .map(p => `${p.unlimited ? '∞' : fmtCredits(p.remaining ?? 0)} / ${p.unlimited ? '不限量' : fmtCredits(p.limit ?? 0)}`)
-    .reduce((a, b) => (textPx(b) > textPx(a) ? b : a), '');
-  const nameWidth = nameCells(widestQuota);
-  let y = rowBase;
-  for (const p of shown) {
-    const remain = p.unlimited ? '∞' : fmtCredits(p.remaining ?? 0);
-    const limit = p.unlimited ? '不限量' : fmtCredits(p.limit ?? 0);
-    const name = escHtml(truncate(p.name, nameWidth));
-    parts.push(`<text x="0" y="${y}" fill="${pal.body}" font-size="11">${name}</text>`);
-    parts.push(
-      `<text x="${X_QUOTA}" y="${y}" font-size="11" text-anchor="end"><tspan fill="${pal.strong}" font-weight="600">${remain}</tspan><tspan fill="${pal.muted}" font-weight="400"> / ${limit}</tspan></text>`
-    );
-    parts.push(`<text x="${RIGHT}" y="${y}" fill="${pal.muted}" font-size="9.5" text-anchor="end">${fmtTime(p.expireTime)}</text>`);
-    const lineTop = y + TXT_DESC + STEP;
-    parts.push(`<line x1="0" y1="${lineTop + LINE_ROWS / 2}" x2="${W}" y2="${lineTop + LINE_ROWS / 2}" stroke="${pal.rowLine}" stroke-width="1"/>`);
-    y += rowPitch;
+  if (checkinStateText === '今日未签到') {
+    return 'unclaimed';
   }
+  if (checkinStateText === '签到活动未开启') {
+    return 'disabled';
+  }
+  return 'unknown';
+}
 
-  // 页脚：签到状态（只显示今天是否已签到，不带日期）+ 本次刷新时间
-  // 页脚：签到状态（只显示今天签没签，不带日期）+ 本次刷新时间。
-  // 只在「查的确实是今天」时才展示，跨天后回落成中性的「签到未查询」，不把昨天的状态说成今天的。
-  const checkinToday = new Date().toLocaleDateString('sv');
-  const checkin = checkinStateText && checkinStateDay === checkinToday ? checkinStateText : '';
-  const checked = checkin.startsWith('今日已签到');
-  const dotColor = checked ? '#4caf50' : checkin === '今日未签到' ? '#d7a33a' : pal.muted;
-  parts.push(`<circle cx="3.5" cy="${footBase - (TXT_ASC - TXT_DESC) / 2}" r="3.5" fill="${dotColor}"/>`);
-  parts.push(`<text x="12" y="${footBase}" fill="${pal.body}" font-size="11">${escHtml(checkin || '签到未查询')}</text>`);
-  const fetchedClock = new Date(fetchedAt);
-  parts.push(
-    `<text x="${RIGHT}" y="${footBase}" fill="${pal.muted}" font-size="10" text-anchor="end">更新 ${pad2(fetchedClock.getHours())}:${pad2(fetchedClock.getMinutes())}</text>`
-  );
+/** Light 与 HighContrastLight 都走浅色，其余深色；SVG 配色写死，换主题必须重绘 */
+function themeKind(): 'light' | 'dark' {
+  const kind = vscode.window.activeColorTheme.kind;
+  return kind === vscode.ColorThemeKind.Light || kind === vscode.ColorThemeKind.HighContrastLight ? 'light' : 'dark';
+}
 
-  // SVG 在 tooltip 里落在 38.7px 处，整体下移 0.3 让所有元素压在整数像素行上，
-  // 否则抗锯齿会把 1px 分隔线糊成两行，实测间距在 10/11 之间跳。
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="Segoe UI, Microsoft YaHei, sans-serif"><g transform="translate(0,0.3)">${parts.join('')}</g></svg>`;
+function fmtQuota(value: number, unlimited: boolean): string {
+  return unlimited ? '不限量' : fmtCredits(value);
 }
 
 function render(summary: CreditsSummary): void {
-  const pct = pctOf(summary);
+  const pct = summary.unlimited ? 100 : pctOf(summary.remaining, summary.limit);
   statusBar.text = summary.unlimited
-    ? '$(trae-sparkle) ∞'
+    ? '$(trae-sparkle) 不限量 (100%)'
     : `$(trae-sparkle) ${fmtCredits(summary.remaining)} (${pct}%)`;
 
-  // 哪些包进明细由 api.ts 一处决定（已用尽的不返回），这里只排序，不再重复过滤
-  const packs = [...summary.packs].sort((a, b) => (a.expireTime ?? Infinity) - (b.expireTime ?? Infinity));
+  const fetched = new Date(lastFetchedAt || Date.now());
+  const updatedAt = `${pad2(fetched.getHours())}:${pad2(fetched.getMinutes())}`;
+  const data = buildPanelData(
+    {
+      remain: summary.remaining,
+      total: summary.limit,
+      unlimited: summary.unlimited,
+      packs: summary.packs.map(p => ({
+        name: p.name,
+        remain: p.remaining ?? 0,
+        limit: p.limit ?? 0,
+        unlimited: p.unlimited,
+        plan: p.plan,
+        expireTime: p.expireTime
+      }))
+    },
+    checkinCode(),
+    updatedAt,
+    lastAccountName,
+    cfg().get<boolean>('planPackFirst', true)
+  );
 
-  const pal = paletteFor(vscode.window.activeColorTheme.kind);
-  const iconColor = pal.muted;
-
-  const md = new vscode.MarkdownString();
-  // isTrusted 服务于标题行三个硬编码链接（两条 command: + 用量在 Trae 系也是 command:）；
-  // supportHtml 必须为 true，否则 `<a><img align="right" hspace>` 的图标不渲染，右浮动间距纯 Markdown 做不到。
-  // 这两项合起来等于「markdown 层里不得出现远程字段」：链接目标全是本文件里的常量，
-  // 远程数据只进 base64 的 <img> 内容，且进 SVG 前已在 api.ts / escHtml 里净化与转义。
+  const md = new vscode.MarkdownString(
+    buildTooltipMarkdown(data, {
+      theme: themeKind(),
+      detailRows: detailRows(),
+      appName: vscode.env?.appName
+    })
+  );
+  // 标题行三个链接全是本文件常量；supportHtml 必须开，否则 align="right" 的图标不渲染
   md.isTrusted = true;
   md.supportHtml = true;
-  // 标题行：左标题 + 右浮动可点击图标。float:right 按 DOM 顺序从右往左排，
-  // 所以视觉上是 用量 · 刷新 · 设置；相邻图标间距 = 两者 hspace 之和，用量取 6 与前两者等距
-  md.appendMarkdown(
-    `### TraeCN 积分余额 ` +
-      `<a href="command:workbench.action.openSettings?%5B%22traecnquota%22%5D"><img src="${gearIconUri(iconColor)}" align="right" width="14" hspace="6" alt="设置"></a>` +
-      `<a href="command:traecnquota.refresh"><img src="${refreshIconUri(iconColor)}" align="right" width="14" hspace="18" alt="刷新"></a>` +
-      `<a href="${usageTargetHref(vscode.env?.appName)}"><img src="${usageIconUri(iconColor)}" align="right" width="14" hspace="6" alt="用量明细"></a>\n\n`
-  );
-  md.appendMarkdown(
-    `![积分数据](${svgDataUri(buildTooltipBody(packs, summary, pal, detailRows(), lastFetchedAt))})`
-  );
   statusBar.tooltip = md;
 }
 
@@ -697,6 +382,7 @@ async function refresh(verbose: boolean, preResolved?: TraeAuth): Promise<void> 
       throw credits.reason;
     }
     const summary = credits.value;
+    lastAccountName = (auth.username || '').trim();
     lastSummary = summary;
     lastFetchedAt = Date.now();
     render(summary);
@@ -718,6 +404,7 @@ async function refresh(verbose: boolean, preResolved?: TraeAuth): Promise<void> 
       message = `登录态已于 ${new Date(auth.expiredAt as string).toLocaleString()} 过期，请在 ${editionLabel(auth.edition)} 客户端里重新登录`;
     }
     lastSummary = undefined;
+    lastAccountName = '';
     // 接口正文只进输出面板，绝不进 tooltip 和 toast
     log(`刷新失败：${message}${api.remoteDetail ? `｜接口返回：${api.remoteDetail}` : ''}`);
     renderError(message);
@@ -756,7 +443,7 @@ async function refreshCheckinState(auth: TraeAuth): Promise<void> {
 
 /**
  * 日期守卫按账号分桶。同一台机器上常同时存在 Trae CN 与 TRAE SOLO CN 两个账号，
- * 共用一个日期会让先领的那个把另一个挡掉一整天（切 edition 后刷新也不会补领）。
+ * 共用一个日期会让先领的那个把另一个挡掉一整天（换客户端后刷新也不会补领）。
  * 桶名优先用 userId，拿不到（手动 Token）时退回 edition。
  */
 function claimDateOf(accountKey: string): string | undefined {
@@ -963,14 +650,22 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!event.affectsConfiguration('traecnquota')) {
         return;
       }
+      // edition 已移除；启动清理它的回声不需要触发刷新
+      if (event.affectsConfiguration('traecnquota.edition')) {
+        return;
+      }
       // 配置事件对象不跨 await 使用，先把判定算成局部量
       const tokenChanged = event.affectsConfiguration('traecnquota.manualToken');
       const otherKeyChanged = REFRESH_KEYS.some(
         key => key !== 'manualToken' && event.affectsConfiguration(`traecnquota.${key}`)
       );
       // 同一次 settings.json 保存只派发一个多键事件，所以两个判定必须互斥：
-      // 还动了 detailRows 时「需要重绘」优先，不能被下面这个「什么都不用做」的短路吞掉。
-      const displayOnly = !tokenChanged && !otherKeyChanged && event.affectsConfiguration('traecnquota.detailRows');
+      // 还动了 detailRows / planPackFirst 时「需要重绘」优先，不能被下面这个「什么都不用做」的短路吞掉。
+      const displayOnly =
+        !tokenChanged &&
+        !otherKeyChanged &&
+        (event.affectsConfiguration('traecnquota.detailRows') ||
+          event.affectsConfiguration('traecnquota.planPackFirst'));
       // 只动了 autoCheckin（既不影响渲染也不影响取数）时整轮跳过：拨一次开关就打一次接口是打扰。
       // manualToken 的变更必须优先——清理回声判断和 sweep 都依赖它，不能被判成免刷新。
       const checkinOnly = !tokenChanged && !otherKeyChanged && !displayOnly && NO_EFFECT_KEYS.some(
@@ -1011,6 +706,7 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   void (async () => {
+    await removeLegacyEditionSetting();
     await sweepManualToken();
     const auth = await resolveAuth().catch(() => undefined);
     // 宿主识别诊断：页脚底距按 appName 分流，若 TraeCN 上间距仍不对，先看这行的实际值

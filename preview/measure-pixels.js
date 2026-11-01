@@ -1,42 +1,80 @@
 const path = require('path');
 const fs = require('fs');
-const zlib = require('zlib');
 const { execFileSync } = require('child_process');
 const { chromePath, chromeArgs } = require('./chrome.js');
-const { buildCard, summary } = require('./gen-theme-check.js');
+const { readPng } = require('./png.js');
+const {
+  buildPanelData,
+  buildTooltipSvg,
+  paletteFor,
+  accountBadge,
+  gearIconUri,
+  refreshIconUri,
+  usageIconUri
+} = require('../out/tooltip.js');
 
-const REAL = {
-  limit: 7100, used: 1298, remaining: 5802, unlimited: false,
+/**
+ * 纵向门禁：截图上逐行扫描**真实墨迹**带，断言相邻墨迹之间的空白间距。
+ * 这是纵向栅格的唯一回归门——measure-columns.js 只管横向列宽。
+ *
+ * 外壳 CSS 与标题行照 Trae / VSCode 的 .monaco-hover 复刻（与 render-panel.js 同一套）。
+ * 标题行要带上三枚 16px 图标和可选的账号徽标，因为它们会撑高标题行，直接影响「标题→大数字」。
+ * `npm run test:layout` 带 `--check` 跑它。
+ */
+
+const SUMMARY = {
+  remain: 5652,
+  total: 7000,
+  unlimited: false,
   packs: [
-    { name: '老用户福利', limit: 2000, used: 798, remaining: 1202, unlimited: false, expireTime: 1792579103 },
-    { name: '老用户福利', limit: 2000, used: 0, remaining: 2000, unlimited: false, expireTime: 1792579103 },
-    { name: '签到奖励', limit: 150, used: 0, remaining: 150, unlimited: false, expireTime: 1792589264 },
-    { name: '签到奖励', limit: 150, used: 0, remaining: 150, unlimited: false, expireTime: 1792654947 }
+    { name: '基础积分包', remain: 1202, limit: 2000, unlimited: false, plan: false, expireTime: '2026-12-31 18:38' },
+    { name: '签到奖励包', remain: 352, limit: 500, unlimited: false, plan: false, expireTime: '2027-01-15 08:00' },
+    { name: '新用户礼包', remain: 2000, limit: 2000, unlimited: false, plan: false, expireTime: '2027-01-20 09:15' }
   ]
 };
 
-function oldSvg(pal) {
-  const W = 251.7, RIGHT = W, XQ = 145.6, rowH = 30, shown = REAL.packs.slice(0, 4);
-  const rowsTop = 106, footTop = rowsTop + (shown.length - 1) * rowH + 32, H = footTop + 4;
-  const p = [];
-  p.push(`<text x="0" y="32" fill="${pal.strong}" font-size="34" font-weight="800">5,802<tspan fill="${pal.muted}" font-size="13"> / 7,100</tspan></text>`);
-  p.push(`<rect x="${RIGHT - 44}" y="10" width="44" height="22" rx="11" fill="${pal.pill}"/>`);
-  p.push(`<text x="${RIGHT - 22}" y="22" fill="#fff" font-size="11" text-anchor="middle">82%</text>`);
-  p.push(`<rect x="0" y="50" width="${W}" height="5" rx="2.5" fill="${pal.track}"/>`);
-  p.push(`<text x="0" y="80" fill="${pal.muted}" font-size="10">明细</text><text x="${XQ}" y="80" fill="${pal.muted}" font-size="10" text-anchor="end">额度</text><text x="${RIGHT}" y="80" fill="${pal.muted}" font-size="10" text-anchor="end">到期</text>`);
-  p.push(`<line x1="0" y1="88" x2="${W}" y2="88" stroke="${pal.divider}" stroke-width="1"/>`);
-  let y = rowsTop;
-  for (const k of shown) {
-    p.push(`<text x="0" y="${y}" fill="${pal.body}" font-size="11">${k.name}</text><text x="${XQ}" y="${y}" font-size="11" text-anchor="end">${k.remaining} / ${k.limit}</text><text x="${RIGHT}" y="${y}" fill="${pal.muted}" font-size="9.5" text-anchor="end">2026-10-21 18:38:23</text>`);
-    p.push(`<line x1="0" y1="${y + 12}" x2="${W}" y2="${y + 12}" stroke="${pal.rowLine}" stroke-width="1"/>`);
-    y += rowH;
-  }
-  p.push(`<circle cx="3.5" cy="${footTop - 3.5}" r="3.5" fill="#d7a33a"/><text x="12" y="${footTop}" fill="${pal.body}" font-size="11">今日未签到</text><text x="${RIGHT}" y="${footTop}" fill="${pal.muted}" font-size="10" text-anchor="end">更新 14:39:57</text>`);
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="Segoe UI, Microsoft YaHei, sans-serif">${p.join('')}</svg>`;
+/** 每行金额串里有没有逗号——有逗号才有下伸，这才决定「行→分隔线」是 10 还是 11 */
+const ROW_HAS_DESCENDER = [true, false, true];
+const ROWS = ROW_HAS_DESCENDER.length;
+/** 每行两段：分隔线→行恒 10；行→分隔线在无下伸字符时是 11 */
+const ROW_GAPS = ROW_HAS_DESCENDER.flatMap((d) => [10, d ? 10 : 11]);
+
+/**
+ * 期望的墨迹间距（自上而下，与 codebuddy 的版式同一套）。
+ * 注意：16px 标题图标把标题带向上撑了 1px，所以「外框顶→标题」实测 13（旧 14px 图标时是 14）。
+ *  13 外框顶→标题（图标顶比标题文字高 1px）
+ *  15 标题→大数字（无徽标；TraeCN 积分面板没有下伸字母）
+ *  10 大数字→进度条、10 进度条→表头、5 表头→表头分隔线
+ *  每行两段：分隔线→行 10；行→分隔线 10，但该行无逗号等下伸字符时是 11
+ *  末行分隔线→页脚 10、页脚→浮窗下边缘 10
+ *
+ * 徽标把标题行撑高 1px：标题→大数字 16、页脚→浮窗下边缘 11；两态分开锁。
+ */
+const EXPECTED_NO_BADGE = [13, 15, 10, 10, 5, ...ROW_GAPS, 10, 10];
+const EXPECTED_WITH_BADGE = [13, 16, 10, 10, 5, ...ROW_GAPS, 10, 11];
+
+const CHECK = process.argv.includes('--check');
+
+function bodySvg(account) {
+  const data = buildPanelData(SUMMARY, 'unclaimed', '14:39', account);
+  return buildTooltipSvg(data, paletteFor('dark'), ROWS, undefined);
 }
 
-function page(svg) {
-  const pal = buildCard('dark').pal;
+function titleRow(account) {
+  const pal = paletteFor('dark');
+  const badge = account
+    ? (() => {
+        const b = accountBadge(account, pal.muted);
+        return `<img src="${b.uri}" align="top" width="${b.width.toFixed(1)}" height="18" alt="当前账号">`;
+      })()
+    : '';
+  const gear = `<a href="command:x"><img src="${gearIconUri(pal.muted)}" align="right" width="16" hspace="0" alt="设置"></a>`;
+  const refresh = `<a href="command:x"><img src="${refreshIconUri(pal.muted)}" align="right" width="16" hspace="0" alt="刷新"></a>`;
+  const usage = `<a href="command:x"><img src="${usageIconUri(pal.muted)}" align="right" width="16" hspace="0" alt="用量明细"></a>`;
+  return `<h3>TraeCN 积分面板 ${badge}${gear}${refresh}${usage}</h3>`;
+}
+
+function page(svg, account) {
   return `<!doctype html><html><head><meta charset="utf-8"><style>
 html,body{margin:0;padding:0;background:#252526}
 body{font-family:"Segoe UI","Microsoft YaHei",sans-serif}
@@ -44,125 +82,80 @@ body{font-family:"Segoe UI","Microsoft YaHei",sans-serif}
 .monaco-hover{box-sizing:border-box;line-height:1.5em}
 .monaco-hover .hover-contents{padding:4px 8px}
 .monaco-hover p,.monaco-hover h3{margin:8px 0}
-.monaco-hover h3{line-height:1.1;font-size:15.21px;font-weight:700}
+.monaco-hover h3{line-height:1.1;font-size:15.21px;font-weight:700;font-family:"Segoe WPC","Segoe UI","Microsoft YaHei",sans-serif}
 .monaco-hover p:last-child{margin-bottom:0}
 </style></head><body><div class="workbench-hover monaco-hover"><div class="markdown-hover"><div class="hover-contents">
-<h3>TraeCN 积分余额</h3>
+${titleRow(account)}
 <p>${svg.replace('<svg ', '<svg id="body" ')}</p>
 </div></div></div></body></html>`;
 }
 
-function decodePng(buf) {
-  let pos = 8, w = 0, h = 0, ct = 0, idat = [];
-  while (pos < buf.length) {
-    const len = buf.readUInt32BE(pos);
-    const type = buf.toString('ascii', pos + 4, pos + 8);
-    const data = buf.slice(pos + 8, pos + 8 + len);
-    if (type === 'IHDR') { w = data.readUInt32BE(0); h = data.readUInt32BE(4); ct = data[9]; }
-    if (type === 'IDAT') idat.push(data);
-    if (type === 'IEND') break;
-    pos += 12 + len;
-  }
-  const raw = zlib.inflateSync(Buffer.concat(idat));
-  const bpp = ct === 6 ? 4 : 3;
-  const stride = w * bpp;
-  const out = Buffer.alloc(h * stride);
-  let rp = 0;
-  for (let y = 0; y < h; y++) {
-    const ft = raw[rp++];
-    for (let x = 0; x < stride; x++) {
-      const cur = raw[rp + x];
-      const a = x >= bpp ? out[y * stride + x - bpp] : 0;
-      const b = y > 0 ? out[(y - 1) * stride + x] : 0;
-      const c = y > 0 && x >= bpp ? out[(y - 1) * stride + x - bpp] : 0;
-      let v;
-      if (ft === 0) v = cur;
-      else if (ft === 1) v = cur + a;
-      else if (ft === 2) v = cur + b;
-      else if (ft === 3) v = cur + ((a + b) >> 1);
-      else {
-        const pp = a + b - c, pa = Math.abs(pp - a), pb = Math.abs(pp - b), pc = Math.abs(pp - c);
-        v = cur + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c);
-      }
-      out[y * stride + x] = v & 255;
-    }
-    rp += stride;
-  }
-  return { w, h, bpp, px: out };
-}
-
-Object.assign(summary, REAL);
-summary.packs = REAL.packs;
-const pal = buildCard('dark').pal;
-const cases = { '改前基线': oldSvg(pal), ['改后 v' + require('../package.json').version]: buildCard('dark').bodySvg };
 const BG = [0x25, 0x25, 0x26];
-const CHROME = chromePath();
 
-/**
- * 当前设计的期望墨迹间距（自上而下），随明细行数与样本数据推导：
- *  14 外框顶→标题（VSCode 固定）、15 标题→大数字（用户指定）、
- *  10 大数字→进度条、10 进度条→表头、5 表头→表头分隔线（用户指定）
- *  每行两段：分隔线→行 = 10；行→分隔线 = 10，但该行文本没有逗号等下伸字符时是 11
- *  末行分隔线→页脚 = 10，页脚→浮窗下边缘 = 10
- */
-const ROWS = 3;
-const ROW_HAS_DESCENDER = [true, true, false]; // '1,202 / 2,000' 有逗号，'150 / 150' 没有
-const EXPECTED = [14, 15, 10, 10, 5];
-for (let i = 0; i < ROWS; i++) {
-  EXPECTED.push(10, ROW_HAS_DESCENDER[i] ? 10 : 11);
-}
-EXPECTED.push(10, 10);
-const CHECK = process.argv.includes('--check');
-let failures = 0;
-
-for (const [name, svg] of Object.entries(cases)) {
-  const html = path.join(__dirname, '_shot.html');
-  const png = path.join(__dirname, '_shot.png');
-  fs.writeFileSync(html, page(svg), 'utf8');
-  execFileSync(CHROME,
+function measure(account) {
+  const html = path.join(__dirname, '_pixels.html');
+  const png = path.join(__dirname, '_pixels.png');
+  fs.writeFileSync(html, page(bodySvg(account), account), 'utf8');
+  execFileSync(chromePath(),
     ['--headless=new', '--disable-gpu', ...chromeArgs(), '--hide-scrollbars', '--force-device-scale-factor=1', '--window-size=320,420', `--screenshot=${png}`, 'file:///' + html.replace(/\\/g, '/')],
     { encoding: 'utf8', timeout: 90000 });
-  const { w, h, bpp, px } = decodePng(fs.readFileSync(png));
-  fs.unlinkSync(html); fs.unlinkSync(png);
+  const { w, h, bpp, px } = readPng(png);
+  fs.unlinkSync(html);
+  fs.unlinkSync(png);
+
   const bands = [];
   let cur = null;
   for (let y = 0; y < h; y++) {
     let hit = 0;
-    // 跳过 1px 边框列，否则边框会让每一行都算"有内容"
+    // 跳过 1px 边框列，否则边框会让每一行都算「有内容」
     for (let x = 3; x < 266; x++) {
       const i = y * w * bpp + x * bpp;
-      if (Math.abs(px[i] - BG[0]) + Math.abs(px[i + 1] - BG[1]) + Math.abs(px[i + 2] - BG[2]) > 12) { hit++; if (hit > 1) break; }
+      if (Math.abs(px[i] - BG[0]) + Math.abs(px[i + 1] - BG[1]) + Math.abs(px[i + 2] - BG[2]) > 12) {
+        hit++;
+        if (hit > 1) break;
+      }
     }
     if (hit > 1) {
       if (!cur) cur = { top: y, bottom: y };
       else cur.bottom = y;
-    } else if (cur) { bands.push(cur); cur = null; }
+    } else if (cur) {
+      bands.push(cur);
+      cur = null;
+    }
   }
   if (cur) bands.push(cur);
+
   const gaps = [];
   let prev = null;
-  bands.forEach(b => {
+  bands.forEach((b) => {
     if (prev) gaps.push(b.top - prev.bottom - 1);
     prev = b;
   });
-  console.log('\n### ' + name + '  截图 ' + w + 'x' + h + '，检出 ' + (bands.length) + ' 个有笔画/有色的行带');
-  bands.forEach((b, i) => {
-    console.log((i === 0 ? '     -' : String(gaps[i - 1]).padStart(6)) + ' | y ' + b.top + ' ~ ' + b.bottom + '  高 ' + (b.bottom - b.top + 1));
+  return { w, h, bands, gaps };
+}
+
+let failures = 0;
+for (const [label, account, expected] of [
+  ['无徽标', '', EXPECTED_NO_BADGE],
+  ['有徽标', '示例用户', EXPECTED_WITH_BADGE]
+]) {
+  const m = measure(account);
+  console.log(`\n### ${label}：截图 ${m.w}x${m.h}，检出 ${m.bands.length} 个墨迹带`);
+  m.bands.forEach((b, i) => {
+    console.log((i === 0 ? '     -' : String(m.gaps[i - 1]).padStart(6)) + ' | y ' + b.top + ' ~ ' + b.bottom + '  高 ' + (b.bottom - b.top + 1));
   });
-  if (!name.startsWith('改前')) {
-    const bad = gaps.map((g, i) => (EXPECTED[i] === undefined || g === EXPECTED[i] ? null : `第${i + 1}处 期望 ${EXPECTED[i]} 实测 ${g}`)).filter(Boolean);
-    if (gaps.length !== EXPECTED.length) {
-      bad.push(`间距段数 期望 ${EXPECTED.length} 实测 ${gaps.length}`);
-    }
-    if (bad.length) {
-      failures++;
-      console.log('  FAIL: ' + bad.join('；'));
-    } else {
-      console.log(`  OK: ${EXPECTED.length} 处墨迹间距全部符合期望`);
-    }
+  const bad = m.gaps
+    .map((g, i) => (expected[i] === undefined || g === expected[i] ? null : `第${i + 1}处 期望 ${expected[i]} 实测 ${g}`))
+    .filter(Boolean);
+  if (m.gaps.length !== expected.length) {
+    bad.push(`间距段数 期望 ${expected.length} 实测 ${m.gaps.length}`);
+  }
+  if (bad.length) {
+    failures++;
+    console.log('FAIL: ' + bad.join('；'));
+  } else {
+    console.log(`OK: ${expected.length} 处墨迹间距全部符合期望`);
   }
 }
 
-if (CHECK) {
-  process.exit(failures ? 1 : 0);
-}
+process.exit(CHECK && failures ? 1 : 0);

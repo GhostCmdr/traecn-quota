@@ -187,7 +187,12 @@ function freshRequire() {
       delete require.cache[key];
     }
   }
-  return require(path.join(OUT, 'extension.js'));
+  // 面板与格式化已拆到 tooltip.js / format.js；测试仍从同一个对象取，减少用例改动
+  return {
+    ...require(path.join(OUT, 'extension.js')),
+    ...require(path.join(OUT, 'tooltip.js')),
+    ...require(path.join(OUT, 'format.js'))
+  };
 }
 
 /**
@@ -207,7 +212,8 @@ const packOf = (name, limit, used, day) => ({
   display_desc: name,
   entitlement_base_info: { quota: { credits_limit: limit } },
   usage: { credits_amount: used },
-  expire_time: 1792579103 + day * 86400
+  // 固定放在 2100 年，避免测试夹具随时间过期；用例只关心行数/额度，不关心具体日期
+  expire_time: 4102444800 + day * 86400
 });
 const usageBody = {
   is_credits_billing: true,
@@ -511,8 +517,8 @@ test('刷新被锁挡住时必须补一轮，不能无声丢掉换凭证的那�
   ext.activate(activeStub.context);
   await settle();
 
-  activeStub.setConfig('edition', 'cn');
-  await activeStub.fireConfigurationChange('traecnquota.edition');
+  activeStub.setConfig('hostOverride', 'https://api.trae.cn');
+  await activeStub.fireConfigurationChange('traecnquota.hostOverride');
   await settle();
   const during = urls.length;
   release();
@@ -620,37 +626,13 @@ test('保管箱写不进去时不崩，回落到客户端登录态并报未找�
   globalThis.fetch = undefined;
 });
 
-test('edition 被手改成无法识别的值时，直接指出是这个设置写错了', async t => {
-  const isolate = isolateLoginState('badedition');
+test('启动时清理旧版本残留的 edition 设置', async t => {
   countingFetch();
-  activeStub = makeStubCheckinOff({ edition: 'trae', detailRows: 3, refreshInterval: 0 });
+  activeStub = makeStubCheckinOff({ edition: 'cn', detailRows: 3, refreshInterval: 0 });
   const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
-  const tip = String(activeStub.statusItems[0].tooltip);
-  assert.match(tip, /edition 的值不是可识别的客户端/, tip);
-  assert.doesNotMatch(tip, /undefined/, '不该拼出「未找到 undefined 的登录态文件」这种话');
-  isolate.restore();
-  globalThis.fetch = undefined;
-});
-
-test('edition 里被塞进 Markdown 链接时，原值不回显、tooltip 里拼不出可点构造', async t => {
-  const isolate = isolateLoginState('inject');
-  countingFetch();
-  // settings.json 是用户/别的进程手可改的，这里的值会流经 Error → tooltip → toast
-  activeStub = makeStubCheckinOff({
-    edition: '[点我重新激活](https://evil.example/x) ![x](http://10.0.0.1/a.png)',
-    detailRows: 3,
-    refreshInterval: 0
-  });
-  const ext = withCleanup(t, freshRequire());
-  ext.activate(activeStub.context);
-  await settle();
-  const tip = String(activeStub.statusItems[0].tooltip);
-  assert.match(tip, /不是可识别的客户端/, '仍要说清楚是哪项设置错了');
-  assert.doesNotMatch(tip, /evil\.example|10\.0\.0\.1|点我|重新激活/, '原值不得回显到按 Markdown 渲染的 tooltip');
-  assert.doesNotMatch(tip, /[[\]()!]/, 'tooltip 里不该留下成对的 Markdown 元字符');
-  isolate.restore();
+  assert.strictEqual(activeStub.getConfig('edition'), undefined, '旧 edition 键要从 settings 里清掉');
   globalThis.fetch = undefined;
 });
 
@@ -778,7 +760,7 @@ test('不限量积分包：状态栏与悬浮窗显示 ∞ 和「不限量」，
   const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
-  assert.strictEqual(activeStub.statusItems[0].text, '$(trae-sparkle) ∞');
+  assert.strictEqual(activeStub.statusItems[0].text, '$(trae-sparkle) 不限量 (100%)');
   const svg = bodySvgOf(activeStub);
   assert.ok(svg.includes('∞') && svg.includes('不限量'), svg.slice(0, 200));
   assert.doesNotMatch(svg, /0 \/ 0/);
@@ -970,8 +952,8 @@ test('额度显示按量级压缩：1 万以内千分位，1 万~1 亿用 w，1 
   activeStub = makeStubCheckinOff({ detailRows: 3, refreshInterval: 0 });
   const ext = freshRequire();
   const table = [
-    [0, '0'], [5802, '5,802'], [9999, '9,999'], [10000, '1w'], [15300, '1.5w'],
-    [999999, '100w'], [1234567, '123.5w'], [98765432, '9,877w'], [123456789, '1.2亿']
+    [0, '0'], [5802, '5,802'], [9999, '9,999'], [10000, '1w'], [15300, '1.53w'],
+    [999999, '100w'], [1234567, '123.5w'], [98765432, '9,877w'], [123456789, '1.235亿']
   ];
   for (const [v, want] of table) {
     assert.strictEqual(ext.fmtCredits(v), want, String(v));
@@ -987,30 +969,12 @@ test('fmtCredits：先四舍五入再换档，尾数 .0 去掉，非有限值降
   activeStub = makeStubCheckinOff({ detailRows: 3, refreshInterval: 0 });
   const ext = freshRequire();
   const table = [
-    [9999.4, '9,999'], [9999.6, '1w'], [10499, '1w'], [19999, '2w'],
-    [99999999, '10,000w'], [100000000, '1亿'], [1000000000, '10亿'], [1234567890, '12.3亿'],
+    [9999.4, '9,999'], [9999.6, '1w'], [10499, '1.05w'], [19999, '2w'],
+    [99999999, '1亿'], [100000000, '1亿'], [1000000000, '10亿'], [1234567890, '12.35亿'],
     [0.4, '0'], [NaN, '-'], [Infinity, '-'], [-Infinity, '-']
   ];
   for (const [v, want] of table) {
     assert.strictEqual(ext.fmtCredits(v), want, String(v));
-  }
-  globalThis.fetch = undefined;
-});
-
-test('名称列格数按额度串实测宽度让位；1 万以内的数据与定稿布局一像素不差', () => {
-  countingFetch();
-  activeStub = makeStubCheckinOff({ detailRows: 3, refreshInterval: 0 });
-  const ext = freshRequire();
-  assert.strictEqual(ext.nameCells('2,000 / 2,000'), 10, '定稿数据下 5 个汉字的名称必须原样放得下');
-  assert.strictEqual(ext.nameCells('1,202 / 2,000'), 10);
-  assert.strictEqual(ext.nameCells('100w / 100w'), 11);
-  assert.strictEqual(ext.nameCells('1.5w / 2w'), 11, '窄额度串回到 11 格上限');
-  assert.strictEqual(ext.nameCells('9,999 / 10,000'), 9, '额度串变宽就得让出名称列');
-  assert.ok(ext.nameCells('9,877w / 9,877w') < 11);
-  // 推进宽度估算必须贴住 Chrome 像素扫描的实测墨迹宽，否则整套列间距推导都不成立
-  const measured = [['2,000 / 2,000', 63], ['9,999 / 10,000', 69], ['1.5w / 2w', 47], ['100w / 100w', 62], ['9,999w / 9,999w', 79]];
-  for (const [s, px] of measured) {
-    assert.ok(Math.abs(ext.textPx(s) - px) <= 1.5, s + ' 估算 ' + ext.textPx(s).toFixed(1) + '，实测 ' + px);
   }
   globalThis.fetch = undefined;
 });
@@ -1028,13 +992,15 @@ test('大额度实测：明细行按 w 压缩后渲染，名称与额度两列�
   await settle();
   assert.strictEqual(activeStub.statusItems[0].text, '$(trae-sparkle) 100w (81%)');
   const svg = bodySvgOf(activeStub);
-  const quota = /font-size="11" text-anchor="end"><tspan[^>]*>([^<]*)<\/tspan><tspan[^>]*> \/ ([^<]*)<\/tspan>/.exec(svg);
-  assert.ok(quota, '明细行额度单元格没找到：' + svg.slice(0, 300));
-  assert.strictEqual(quota[1] + ' / ' + quota[2], '100w / 123.5w');
   const name = /<text x="0" y="\d+" fill="[^"]*" font-size="11">([^<]*)<\/text>/.exec(svg);
-  assert.ok(name && name[1].includes('…'), '9 字名称超过 11 格上限，必须仍被截断：' + (name && name[1]));
-  const gap = 145.6 - ext.textPx(quota[1] + ' / ' + quota[2]) - ext.textPx(name[1]);
-  assert.ok(gap >= 19, '两列字面间距实测 ' + gap.toFixed(1) + 'px，不该低于 20px');
+  const remain = /font-size="11" font-weight="600" text-anchor="end">([^<]*)<\/text>/.exec(svg);
+  const limit = /<text x="131\.4" y="\d+" fill="[^"]*" font-size="11">([^<]*)<\/text>/.exec(svg);
+  assert.ok(name && remain && limit, '明细行没找到：' + svg.slice(0, 400));
+  assert.strictEqual(remain[1], '100w');
+  assert.strictEqual(limit[1], '123.5w');
+  assert.ok(name[1].includes('…'), '9 字名称超过名称预算，必须仍被截断：' + name[1]);
+  const gap = 120 - ext.textPx(name[1]) - ext.textPx(remain[1]);
+  assert.ok(gap >= 11, '名称与 remain 的墨迹间距 ' + gap.toFixed(1) + 'px，不该低于 11px');
   globalThis.fetch = undefined;
 });
 
@@ -1512,15 +1478,15 @@ test('切换凭证来源后，另一个账号当天仍要各自领一次', async
   write('Trae CN', '11111', 'token-cn');
   write('TRAE SOLO CN', '22222', 'token-solo');
   const urls = countingFetch();
-  activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0, autoCheckin: true, edition: 'cn' });
+  activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0, autoCheckin: true });
   const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
   assert.strictEqual(claimsOf(urls).length, 1, 'CN 账号启动时领一次');
 
-  // 桩里 setConfig 只改值，事件要单独派发（真实环境是 update 之后由 VSCode 派发）
-  activeStub.setConfig('edition', 'solo-cn');
-  await activeStub.fireConfigurationChange('traecnquota.edition');
+  // Trae CN 登录态消失后，auto 会静默回落到旧的 TRAE SOLO CN
+  fs.rmSync(isolate.storageJson('Trae CN'));
+  await activeStub.commands.get('traecnquota.refresh')();
   await settle();
   await settle();
   assert.strictEqual(claimsOf(urls).length, 2, '换到另一个账号必须再领一次，不能被前一个账号的日期挡掉');
@@ -1637,7 +1603,7 @@ test('签到成功的提示带上用户名，9095 提示改成「当前设备已
     }
     return { status: 200, text: async () => JSON.stringify(u.includes('checkin') ? { enable: true, checked_in: false } : usageBody) };
   };
-  activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0, autoCheckin: true, edition: 'cn' });
+  activeStub = makeVscodeStub({ detailRows: 3, refreshInterval: 0, autoCheckin: true });
   const ext = withCleanup(t, freshRequire());
   ext.activate(activeStub.context);
   await settle();
@@ -1672,7 +1638,7 @@ test('detailRows 夹在 1~6：手改成 0 或 9 都落在边界', async t => {
     display_desc: '包' + i,
     entitlement_base_info: { quota: { credits_limit: 1000 * (i + 1) } },
     usage: { credits_amount: 0 },
-    expire_time: 1792579103 + (i + 1) * 86400
+    expire_time: 4102444800 + (i + 1) * 86400
   }));
   globalThis.fetch = async url => ({
     status: 200,

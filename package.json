@@ -2,7 +2,7 @@
   "name": "traecn-quota",
   "displayName": "TraeCN Quota",
   "description": "Trae CN 积分余量查看器：在状态栏显示余额与套餐明细，支持手动与定时刷新。",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "GhostCmdr",
   "license": "MIT",
   "icon": "resources/icon.png",
@@ -80,29 +80,19 @@
           "default": 3,
           "minimum": 1,
           "maximum": 6,
-          "markdownDescription": "积分包显示数量，按到期时间升序，超出的不显示。可调 `1` ~ `6`。"
+          "markdownDescription": "积分包显示数量，超出的不显示；排序受「订阅套餐置顶」影响。可调 `1` ~ `6`。"
+        },
+        "traecnquota.planPackFirst": {
+          "category": "TraeCN Quota",
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "**订阅套餐置顶显示**\n\n订阅后套餐包会置顶并标注「套餐内」；未订阅 Trae 套餐时不会显示套餐包。"
         },
         "traecnquota.autoCheckin": {
           "category": "TraeCN Quota",
           "type": "boolean",
           "default": true,
           "markdownDescription": "每天自动签到，成功后当天不再重复。如签到失败请手动点击图标补签（同一设备只能签到一个账户）"
-        },
-        "traecnquota.edition": {
-          "category": "TraeCN Quota",
-          "type": "string",
-          "enum": [
-            "auto",
-            "cn",
-            "solo-cn"
-          ],
-          "enumDescriptions": [
-            "自动检测已安装并登录的 Trae 国内版客户端",
-            "Trae CN（TraeCode 国内版）",
-            "TRAE SOLO CN（TraeWork 国内版）"
-          ],
-          "default": "auto",
-          "markdownDescription": "从哪个 Trae 国内版客户端的本地登录态读取凭证。"
         },
         "traecnquota.hostOverride": {
           "category": "TraeCN Quota",
@@ -115,7 +105,7 @@
           "type": "string",
           "default": "",
           "format": "password",
-          "markdownDescription": "手动指定 accessToken。（最高优先，重复填写自动收进保管箱并覆盖旧值）如需弃用，请执行命令 TraeCN Quota: 清除保管箱里的值。留空则自动从本地登录态获取。"
+          "markdownDescription": "手动指定 accessToken。（最高优先，重复填写会自动收进保管箱并覆盖旧值）保管箱为空时自动读取客户端登录态；如需弃用，请执行命令 TraeCN Quota: 清除保管箱里的手动 Token。"
         }
       }
     }

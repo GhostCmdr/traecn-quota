@@ -44,6 +44,14 @@ interface CheckinStatus {
   checked_in?: boolean;
 }
 
+/**
+ * 订阅套餐的 product_type（Trae workbench 内部枚举）：
+ * Free=0 / Pro=1 / Package=2 / PromoCode=3 / ProPlus=4 / ProPlusPack=5 /
+ * Ultra=6 / PayGo=7 / Lite=8 / SoloInvite=9 / CNExpress=100。
+ * 只把 Pro / ProPlus / Ultra / Lite 当作订阅套餐；Package 是增购积分包，PromoCode 是兑换码。
+ */
+const PLAN_PRODUCT_TYPES = new Set([1, 4, 6, 8]);
+
 export interface CreditPack {
   name: string;
   /** 缺字段与值本身是 undefined 都可能出现（服务端不给），显式允许 undefined 以免类型说谎 */
@@ -52,6 +60,10 @@ export interface CreditPack {
   remaining?: number | undefined;
   unlimited: boolean;
   expireTime?: number | undefined;
+  /** 接口的 entitlement_base_info.product_type */
+  productType?: number | undefined;
+  /** 订阅套餐包：用于「套餐内」标签与置顶 */
+  plan: boolean;
 }
 
 export interface CreditsSummary {
@@ -222,7 +234,7 @@ interface EntUsageResponse {
   user_entitlement_pack_list?: Array<{
     display_desc?: string;
     expire_time?: number;
-    entitlement_base_info?: { quota?: { credits_limit?: number } };
+    entitlement_base_info?: { product_type?: number; quota?: { credits_limit?: number } };
     usage?: { credits_amount?: number };
   }>;
 }
@@ -230,6 +242,9 @@ interface EntUsageResponse {
 /**
  * 积分余额。聚合口径与 TraeCode 客户端一致：
  * 逐个积分包累加限额与已用量，credits_limit 为 -1 表示不限量。
+ *
+ * 分母只统计**未过期**的有限额包：过期包既不进 limit / used / remaining，也不进明细；
+ * 已用完但未过期的包仍计入分母。与 codebuddy 的「OnlyValidPeriod」口径一致。
  */
 export async function fetchCredits(auth: TraeAuth): Promise<CreditsSummary> {
   const raw = await postJson<EntUsageResponse>(auth, PATH_ENT_USAGE, {
@@ -238,11 +253,13 @@ export async function fetchCredits(auth: TraeAuth): Promise<CreditsSummary> {
   });
 
   const packs: CreditPack[] = [];
+  const nowMs = Date.now();
   let limit = 0;
   let used = 0;
   let remaining = 0;
   let hasQuota = false;
   let hasUnlimitedPack = false;
+  let hasExpiredPack = false;
 
   for (const pack of raw.user_entitlement_pack_list ?? []) {
     // 声明是 number 不代表运行时是：JSON.parse 会给出 Infinity(1e999)、字符串、对象，
@@ -252,6 +269,17 @@ export async function fetchCredits(auth: TraeAuth): Promise<CreditsSummary> {
     const rawUsed = pack.usage?.credits_amount;
     const packUsed = typeof rawUsed === 'number' && Number.isFinite(rawUsed) ? rawUsed : 0;
     const rawName = (pack as { display_desc?: unknown }).display_desc;
+    const rawProductType = pack.entitlement_base_info?.product_type;
+    const productType =
+      typeof rawProductType === 'number' && Number.isFinite(rawProductType) ? rawProductType : undefined;
+    const rawExpire = pack.expire_time;
+    const expireTime = typeof rawExpire === 'number' && Number.isFinite(rawExpire) ? rawExpire : undefined;
+
+    // 过期包（expire_time > 0 且已到点）整体跳过；0 / 缺失按「无到期」处理
+    if (expireTime !== undefined && expireTime > 0 && expireTime * 1000 <= nowMs) {
+      hasExpiredPack = true;
+      continue;
+    }
 
     let packRemaining: number | undefined;
     if (packLimit === -1) {
@@ -271,12 +299,18 @@ export async function fetchCredits(auth: TraeAuth): Promise<CreditsSummary> {
       used: packUsed,
       remaining: packRemaining,
       unlimited: packLimit === -1,
-      expireTime: typeof pack.expire_time === 'number' && Number.isFinite(pack.expire_time) ? pack.expire_time : undefined
+      expireTime,
+      productType,
+      plan: productType !== undefined && PLAN_PRODUCT_TYPES.has(productType)
     });
   }
 
   if (!hasQuota) {
-    throw new Error('账号没有任何积分包，可能未切换到积分计费模式');
+    throw new Error(
+      hasExpiredPack
+        ? '账号没有可用的积分包（积分包可能都已过期）'
+        : '账号没有任何积分包，可能未切换到积分计费模式'
+    );
   }
 
   // 整体「不限量」仅当账号没有任何有限额积分包时成立；
@@ -288,7 +322,8 @@ export async function fetchCredits(auth: TraeAuth): Promise<CreditsSummary> {
     used,
     remaining,
     unlimited,
-    // 明细只列还有余额的包：用尽的包即使已用量 > 0 也不展示（额度累加在上面已经算过，不受这里影响）
-    packs: packs.filter(p => p.unlimited || (p.remaining ?? 0) > 0)
+    // 额度字段无效（既不是正数也不是 -1）的包直接丢掉，避免脏数据进面板；
+    // 用尽（remaining=0）的有效包要保留，展示层按「有没有剩余 / 是不是套餐包」决定显不显示。
+    packs: packs.filter(p => p.unlimited || p.limit !== undefined)
   };
 }

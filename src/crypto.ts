@@ -85,6 +85,21 @@ function deriveKeyAndIv(randomBytes: Buffer, encType: EncType): { key: Buffer; i
   };
 }
 
+/** 解析 JWT 的字符串声明（昵称等）；非 JWT、字段缺失或不是非空字符串都返回 undefined */
+export function jwtStringClaim(token: string, claim: string): string | undefined {
+  const segment = token.split('.')[1];
+  if (!segment) {
+    return undefined;
+  }
+  try {
+    const json = JSON.parse(Buffer.from(segment.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+    const value = json?.[claim];
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** 解密 storage.json 中 "tc" 格式的密文，返回明文 JSON 字符串。 */
 export function decryptTcValue(base64Value: string): string {
   const buffer = Buffer.from(base64Value, 'base64');

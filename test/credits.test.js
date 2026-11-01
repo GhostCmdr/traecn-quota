@@ -1,5 +1,20 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
+const { buildPanelData } = require('../out/tooltip.js');
+
+const toPanelSummary = s => ({
+  remain: s.remaining,
+  total: s.limit,
+  unlimited: s.unlimited,
+  packs: s.packs.map(p => ({
+    name: p.name,
+    remain: p.remaining ?? 0,
+    limit: p.limit ?? 0,
+    unlimited: p.unlimited,
+    plan: p.plan,
+    expireTime: p.expireTime
+  }))
+});
 
 // api.js 在模块加载时就捕获了 globalThis.fetch，所以必须先装桩再 require
 function stubFetch(impl) {
@@ -45,12 +60,23 @@ test('不限量与有限额混合时，不限量不得把整体判成不限量',
   assert.strictEqual(s.used, 400, '已用量只能累加有限额包，否则会把不计额度的包算进来');
 });
 
-test('超额使用时 remaining 钳到 0，且用尽的包不进明细', async () => {
+test('超额使用时 remaining 钳到 0；单个包用完时仍保留明细行', async () => {
   const api = stubFetch(async () => ok({ user_entitlement_pack_list: [pack(100, 250, '超用')] }));
   const s = await api.fetchCredits(auth);
   assert.strictEqual(s.remaining, 0);
   assert.strictEqual(s.used, 250, '累加口径不受明细过滤影响');
-  assert.strictEqual(s.packs.length, 0, '明细与状态栏同一口径：用尽的包不展示');
+  assert.strictEqual(s.packs.length, 1, '有效包仍留在数据里，交给面板决定显不显示');
+  const data = buildPanelData(toPanelSummary(s), 'unknown', '14:39');
+  assert.deepStrictEqual(data.packs.map(p => p.name), ['超用'], '全部用完时保留空包行，避免只剩表头');
+});
+
+test('有余额包时，用完的包默认不进明细', async () => {
+  const api = stubFetch(async () => ok({
+    user_entitlement_pack_list: [pack(100, 100, '用完'), pack(1000, 200, '有余额')]
+  }));
+  const s = await api.fetchCredits(auth);
+  const data = buildPanelData(toPanelSummary(s), 'unknown', '14:39');
+  assert.deepStrictEqual(data.packs.map(p => p.name), ['有余额'], '有余额时普通空包让位');
 });
 
 test('一个积分包都没有时明确报错，而不是显示 0/0', async () => {
@@ -183,4 +209,97 @@ test('1e999 这类 Infinity 额度与脏 display_desc：不产生 NaN，名称�
   assert.strictEqual(s.packs.length, 1, '无效包不进明细');
   assert.strictEqual(typeof s.packs[0].name, 'string', 'display_desc 不是字符串时要回落，否则渲染阶段抛 TypeError');
   assert.strictEqual(s.packs[0].name, '积分包');
+});
+
+test('订阅套餐按 product_type 标记：Pro / Pro+ / Ultra / Lite 算套餐，Free / Package / PromoCode 不算', async () => {
+  const withType = (name, type) => ({
+    display_desc: name,
+    entitlement_base_info: { product_type: type, quota: { credits_limit: 1000 } },
+    usage: { credits_amount: 100 }
+  });
+  const api = stubFetch(async () => ok({
+    user_entitlement_pack_list: [
+      withType('Pro', 1),
+      withType('Pro+', 4),
+      withType('Ultra', 6),
+      withType('Lite', 8),
+      withType('Free', 0),
+      withType('Package', 2),
+      withType('Promo', 3)
+    ]
+  }));
+  const s = await api.fetchCredits(auth);
+  assert.deepStrictEqual(
+    s.packs.map(p => [p.name, p.productType, p.plan]),
+    [
+      ['Pro', 1, true],
+      ['Pro+', 4, true],
+      ['Ultra', 6, true],
+      ['Lite', 8, true],
+      ['Free', 0, false],
+      ['Package', 2, false],
+      ['Promo', 3, false]
+    ]
+  );
+});
+
+test('用尽的套餐包在开启置顶时仍显示，普通空包不显示', async () => {
+  const plan = (name, type) => ({
+    display_desc: name,
+    entitlement_base_info: { product_type: type, quota: { credits_limit: 500 } },
+    usage: { credits_amount: 500 }
+  });
+  const free = (name) => ({
+    display_desc: name,
+    entitlement_base_info: { product_type: 0, quota: { credits_limit: 100 } },
+    usage: { credits_amount: 100 }
+  });
+  const bonus = {
+    display_desc: '有余额',
+    entitlement_base_info: { product_type: 0, quota: { credits_limit: 100 } },
+    usage: { credits_amount: 0 }
+  };
+  const api = stubFetch(async () => ok({ user_entitlement_pack_list: [plan('会员 Pro', 1), free('赠送'), bonus] }));
+  const s = await api.fetchCredits(auth);
+  const on = buildPanelData(toPanelSummary(s), 'unknown', '14:39', '', true);
+  assert.deepStrictEqual(on.packs.map(p => p.name), ['会员 Pro', '有余额'], '套餐包用完也要留在置顶行');
+  const off = buildPanelData(toPanelSummary(s), 'unknown', '14:39', '', false);
+  assert.deepStrictEqual(off.packs.map(p => p.name), ['有余额'], '关掉置顶后用尽的普通包不显示');
+});
+
+test('过期积分包不计入分母、已用量和明细', async () => {
+  const now = Math.floor(Date.now() / 1000);
+  const api = stubFetch(async () => ok({
+    user_entitlement_pack_list: [
+      { ...pack(5000, 1000, '过期包'), expire_time: 1 },
+      { ...pack(1000, 200, '有效包'), expire_time: now + 86400 }
+    ]
+  }));
+  const s = await api.fetchCredits(auth);
+  assert.strictEqual(s.limit, 1000, '过期包的 5000 不能进分母');
+  assert.strictEqual(s.used, 200, '过期包的已用量也不累计');
+  assert.strictEqual(s.remaining, 800);
+  assert.deepStrictEqual(s.packs.map(p => p.name), ['有效包']);
+});
+
+test('未过期但已用完的包仍计入分母', async () => {
+  const now = Math.floor(Date.now() / 1000);
+  const api = stubFetch(async () => ok({
+    user_entitlement_pack_list: [
+      { ...pack(1000, 1000, '用完'), expire_time: now + 86400 },
+      { ...pack(500, 100, '有余额'), expire_time: now + 86400 }
+    ]
+  }));
+  const s = await api.fetchCredits(auth);
+  assert.strictEqual(s.limit, 1500, '用完但未过期的包仍占分母');
+  assert.strictEqual(s.used, 1100);
+  assert.strictEqual(s.remaining, 400);
+  assert.strictEqual(s.packs.length, 2, '用完的有效包留在数据里，由面板决定显不显示');
+});
+
+test('所有积分包都过期时明确报错，而不是显示 0/0', async () => {
+  const api = stubFetch(async () => ok({
+    user_entitlement_pack_list: [{ ...pack(100, 0, '过期'), expire_time: 1 }]
+  }));
+  await assert.rejects(() => api.fetchCredits(auth), /都已过期/);
 });

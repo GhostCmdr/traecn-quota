@@ -3,7 +3,6 @@ src/**
 scripts/**
 preview/**
 test/**
-documents/**
 AGENTS.md
 node_modules/**
 **/*.map
@@ -13,6 +12,8 @@ node_modules/**
 .gitignore
 *.vsix
 tsconfig.json
+
+# README.en.md 要进 vsix：README 里的 English 链接在扩展详情页要能打开
 
 # 本地代码索引/IDE 助手的产物。git 侧已经忽略了，但 vsce 只看本文件：
 # 漏了这几行，本机 `npm run package` 出的包会带上整份仓库符号索引、
@@ -29,3 +30,17 @@ tsconfig.json
 .superpowers
 .superpowers/**
 **/*.mut.js
+# Qoder credits-inspector 的本地报告产物
+.qoder-credits
+.qoder-credits/**
+
+# 市场截图走 GitHub raw 链接，不重复打进安装包
+resources/screenshot.png
+
+# zion-mcp 的本地 daemon 注册表与日志
+.zion-mcp
+.zion-mcp/**
+
+# 图标源文件只给脚本生成字体用，不进 vsix
+assets/source/
+assets/source/**

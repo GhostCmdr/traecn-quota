@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { decryptTcValue } from './crypto';
+import { decryptTcValue, jwtStringClaim } from './crypto';
 
 type Edition = 'cn' | 'solo-cn';
 
@@ -143,8 +143,7 @@ function readFingerprintFromDir(edition: Edition): DeviceFingerprint {
 export function loadDeviceFingerprint(edition: string): DeviceFingerprint {
   if (edition && edition !== 'auto') {
     if (!(edition in EDITION_DIRS)) {
-      // 与 loadAuth 同源的错误文案；settings.json 手可改，原值不回显（会进按 Markdown 渲染的界面）
-      throw new Error('traecnquota.edition 的值不是可识别的客户端，只能是 auto / cn / solo-cn');
+      throw new Error('不支持的客户端标识，只能是 auto / cn / solo-cn');
     }
     return readFingerprintFromDir(edition as Edition);
   }
@@ -242,9 +241,8 @@ function toInstant(value: unknown): string | undefined {
 export function loadAuth(edition: string): TraeAuth {
   if (edition && edition !== 'auto') {
     if (!(edition in EDITION_DIRS)) {
-      // settings.json 是用户手可改的，enum 约束不住。不回显原值：那串会进 tooltip 和 toast，
-      // 两处都按 Markdown 渲染，含 [] () 的恶意值能拼出可点外链
-      throw new Error('traecnquota.edition 的值不是可识别的客户端，只能是 auto / cn / solo-cn');
+      // edition 不再是设置项，只作为内部/测试参数；非法值不回显
+      throw new Error('不支持的客户端标识，只能是 auto / cn / solo-cn');
     }
     return readFromDir(edition as Edition);
   }
@@ -260,11 +258,26 @@ export function loadAuth(edition: string): TraeAuth {
   throw new Error(`未能从任何 Trae 客户端读取登录态。${errors.join('；')}`);
 }
 
+/**
+ * 手动 Token 没有 storage.json 里的 account.username；token 是 JWT 时从声明里取昵称。
+ * 取不到就返回 undefined（徽标整块不渲染），绝不为了显示名字额外打接口。
+ */
+function nicknameFromToken(token: string): string | undefined {
+  for (const claim of ['nickname', 'name', 'user_name', 'preferred_username']) {
+    const value = jwtStringClaim(token, claim);
+    if (value) {
+      return toUsername(value);
+    }
+  }
+  return undefined;
+}
+
 export function loadAuthFromToken(token: string): TraeAuth {
   return {
     token,
     userId: '',
     host: DEFAULT_HOST,
+    username: nicknameFromToken(token),
     edition: 'manual',
     ...tryReadFingerprint()
   };

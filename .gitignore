@@ -3,13 +3,13 @@ out/
 *.vsix
 *.tgz
 
-# 预览与量测脚本的生成物（跑 npm run make-icon / preview/gen-theme-check.js 会重新生成）
-preview/theme-check.html
+# 预览与量测脚本的生成物（跑 preview/ 下的脚本会重新生成）
 preview/_*.png
 preview/_*.html
+# 调稿期的一次性量测脚本（下划线前缀）；正式的量测工具放 preview/
+scripts/_*
 
-# 设计稿与内部约定只留本机（全部并进 AGENTS.md）：仓库是公开的，`git add -A` 又不能替你判断
-documents/
+# 本机开发规范只留本机：仓库是公开的，`git add -A` 又不能替你判断
 AGENTS.md
 
 # 编辑器与系统噪音
@@ -25,3 +25,9 @@ build/
 # 但那层是工具生成的，靠它不如在这里再钉一行，免得 `git add -A` 把内部材料带进公开仓库。
 .superpowers/
 
+
+# Qoder credits-inspector 的本地报告产物（JSON + 按会话标题命名的 canvas），可随时重新生成
+.qoder-credits/
+
+# zion-mcp 的本地 daemon 注册表与日志
+.zion-mcp/
